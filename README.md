@@ -35,6 +35,18 @@ supplier emails invoice ────┘   parse · AI code · validate     on th
 Batch lifecycle: `review → approved → dispatched → posted | failed` — every
 transition is recorded; nothing is lost between cloud and SQL.
 
+### Deploy
+
+See [DEPLOY.md](DEPLOY.md): push to GitHub (`scripts\publish_github.ps1`),
+then Render → New → Blueprint → Apply (`render.yaml` does the rest). Run the
+console anywhere against the deployed cloud with:
+
+```powershell
+$env:KIRA_API_URL = "https://kira-cloud.onrender.com"
+$env:KIRA_FIRM_TOKEN = "<token from Render>"
+streamlit run app.py
+```
+
 ### Run the product stack
 
 ```powershell
