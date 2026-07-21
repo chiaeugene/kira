@@ -1,0 +1,4 @@
+# Telegram chat_id -> client mapping for the intake bridge (telegram_bot.py).
+# Unknown senders are logged by the bridge with their chat_id — copy them here.
+"111111111": DEMO_CLIENT
+"222222222": SRI_MURNI_TRADING

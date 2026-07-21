@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Runtime state — never commit a firm's data
+batches/
+posted/
+review_*.csv
+client_data/*/audit.jsonl
+client_data/*/rules.json
+client_data/*/posted_registry.json
+client_data/*/file_log.json
+client_data/*/sql_company.yaml
+
+# Secrets
+.env
+.streamlit/secrets.toml
+
+# OS
+Thumbs.db
+.DS_Store

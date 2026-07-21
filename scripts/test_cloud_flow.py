@@ -1,0 +1,159 @@
+"""End-to-end test of the product architecture:
+
+upload -> Kira Cloud (code+validate, review) -> dirty approve refused ->
+clean approve -> Agent polls (heartbeat recorded) -> posts (dry run) ->
+reports -> posted + registry -> identical re-upload refused (duplicate file)
+-> changed file with same rows flags DUP_POSTED -> Telegram + WhatsApp intake
+-> reject flow -> firm overview -> auth.
+"""
+
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from fastapi.testclient import TestClient
+from openpyxl import load_workbook
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "client_data" / "DEMO_CLIENT"
+SAMPLE = ROOT / "inbox" / "june_purchases_MAJU_JAYA.xlsx"
+
+# fresh state
+for f in ("rules.json", "posted_registry.json", "audit.jsonl", "file_log.json"):
+    p = DATA / f
+    if p.exists():
+        p.unlink()
+if (ROOT / "batches").exists():
+    shutil.rmtree(ROOT / "batches")
+
+import server  # noqa: E402
+import agent as agent_mod  # noqa: E402
+
+api = TestClient(server.app)
+FIRM = {"Authorization": "Bearer dev-firm-token-change-me"}
+
+
+def variant(tag: str) -> Path:
+    """Same transactions, different bytes — simulates a re-export."""
+    wb = load_workbook(SAMPLE)
+    wb["NOTES"]["B9"] = tag
+    out = Path(tempfile.mkdtemp()) / f"june_reexport_{tag}.xlsx"
+    wb.save(out)
+    return out
+
+
+def upload(path: Path, name: str | None = None):
+    with path.open("rb") as f:
+        return api.post("/api/clients/DEMO_CLIENT/upload", headers=FIRM,
+                        files=[("files", (name or path.name, f,
+                                          "application/octet-stream"))])
+
+
+# 0. auth
+assert api.get("/api/batches").status_code == 401
+assert api.post("/api/agent/poll", headers=FIRM, json={}).status_code == 401
+print("[auth] endpoints reject bad tokens  OK")
+
+# 1. upload -> review
+summary = upload(SAMPLE).json()
+bid = summary["batch_id"]
+assert summary["state"] == "review" and summary["lines"] == 11
+print(f"[upload] batch {bid}: {summary['lines']} lines "
+      f"RM {summary['total_rm']:,.2f} channel={summary['channel']}")
+
+# 2. dirty approve refused
+detail = api.get(f"/api/batches/{bid}", headers=FIRM).json()
+r = api.post(f"/api/batches/{bid}/approve", headers=FIRM,
+             json={"rows": detail["rows"]})
+assert r.status_code == 409
+print(f"[approve] dirty refused: blank_codes={r.json()['detail']['blank_codes']}  OK")
+
+# 3. code + approve
+coding = {
+    "Ampang Hardware": ("300-A001", "610-000", "NR"),
+    "ampang hardware sdn bhd": ("300-A001", "610-000", "NR"),
+    "kedai ah seng": ("300-K004", "908-000", "NR"),
+    "Kedai Ah Seng": ("300-K004", "908-000", "NR"),
+    "City Petrol": ("300-C003", "903-000", "NR"),
+    "City Petrol Station": ("300-C003", "903-000", "NR"),
+    "Maxis": ("300-M005", "904-000", "P"),
+    "TNB": ("300-T006", "905-000", "PE"),
+    "Best Office Supplies": ("300-B002", "902-000", "P"),
+    "Percetakan Maju": ("300-S007", "906-000", "P"),
+}
+for row in detail["rows"]:
+    sc, ac, tc = coding[row["supplier"]]
+    row.update(supplier_code=sc, account_code=ac, tax_code=tc, confidence="high")
+r = api.post(f"/api/batches/{bid}/approve", headers=FIRM,
+             json={"rows": detail["rows"]})
+assert r.status_code == 200 and r.json()["state"] == "approved"
+print("[approve] clean batch approved -> queued")
+
+# 4. agent poll -> post -> report (real agent code, in-process transport)
+class TestClientAdapter:
+    def post(self, url, headers=None, json=None):
+        return api.post(url, headers=headers, json=json)
+
+
+agent_cfg = agent_mod.load_cfg(str(ROOT / "agent_config.yaml"))
+assert agent_mod.poll_once(agent_cfg, client=TestClientAdapter()) == "posted"
+assert api.get(f"/api/batches/{bid}", headers=FIRM).json()["state"] == "posted"
+print("[agent] polled, posted (dry run), reported")
+
+# 4b. heartbeat visible on the Connections surface
+agents = api.get("/api/agents", headers=FIRM).json()
+assert "office-pc-1" in agents
+assert agents["office-pc-1"]["modes"]["DEMO_CLIENT"] == "dry_run"
+print(f"[agents] heartbeat: office-pc-1 last_seen={agents['office-pc-1']['last_seen']}")
+
+# 5. identical re-upload refused as duplicate FILE
+r = upload(SAMPLE)
+assert r.status_code == 422, r.status_code
+notes = r.json()["detail"]["notes"]
+assert any("DUPLICATE FILE" in n for n in notes)
+print("[dedup-file] identical bytes refused at intake  OK")
+
+# 6. re-EXPORTED file (new bytes, same rows) -> caught by DUP_POSTED instead
+dup = upload(variant("v1")).json()
+assert dup["errors"] >= 11, dup
+print(f"[dedup-lines] re-exported file flags {dup['errors']} DUP_POSTED errors  OK")
+
+# 7. Telegram + WhatsApp intake webhooks map sender -> client
+v2 = variant("v2")
+with v2.open("rb") as f:
+    r = api.post("/api/intake/telegram?chat_id=111111111",
+                 files={"file": (v2.name, f, "application/octet-stream")})
+assert r.status_code == 200 and r.json()["client"] == "DEMO_CLIENT"
+assert r.json()["channel"] == "telegram"
+tg_bid = r.json()["batch_id"]
+print(f"[telegram] chat 111111111 -> DEMO_CLIENT batch {tg_bid}")
+
+v3 = variant("v3")
+with v3.open("rb") as f:
+    r = api.post("/api/intake/whatsapp?phone=%2B60123456789",
+                 files={"file": (v3.name, f, "application/octet-stream")})
+assert r.status_code == 200 and r.json()["channel"] == "whatsapp"
+print(f"[whatsapp] +60123456789 -> batch {r.json()['batch_id']}")
+
+# unmapped sender is a clean 404
+r = api.post("/api/intake/telegram?chat_id=999",
+             files={"file": ("x.xlsx", b"zz", "application/octet-stream")})
+assert r.status_code == 404
+print("[telegram] unmapped chat_id -> 404  OK")
+
+# 8. reject flow (the Telegram batch)
+r = api.post(f"/api/batches/{tg_bid}/reject", headers=FIRM,
+             json={"reason": "client sent the wrong month"})
+assert r.status_code == 200 and r.json()["state"] == "rejected"
+print("[reject] telegram batch rejected, kept in history")
+
+# 9. firm overview
+ov = api.get("/api/firm/overview", headers=FIRM).json()
+print(f"[overview] queue: {ov['queue']}")
+assert ov["queue"] == {"review": 2, "approved": 0, "dispatched": 0,
+                       "posted": 1, "failed": 0, "rejected": 1}
+
+print("\nALL CLOUD FLOW TESTS PASSED")

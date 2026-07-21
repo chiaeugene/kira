@@ -1,0 +1,108 @@
+"""End-to-end tests: parse (multi-sheet) -> classify -> validate -> approve ->
+learn -> post -> dedup guard -> flywheel -> majority-vote rules."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from kira.classify import classify
+from kira.context import load_client_context
+from kira.ingest import parse_workbook
+from kira.poster import PostedRegistry, SQLConfig, post_batch
+from kira.rules import RuleStore
+from kira.validate import summarize, validate_batch
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "client_data" / "DEMO_CLIENT"
+SAMPLE = ROOT / "inbox" / "june_purchases_MAJU_JAYA.xlsx"
+
+# fresh state for a deterministic test
+for f in ("rules.json", "posted_registry.json", "audit.jsonl"):
+    p = DATA / f
+    if p.exists():
+        p.unlink()
+
+ctx = load_client_context("DEMO_CLIENT", DATA)
+store = RuleStore(DATA)
+registry = PostedRegistry(DATA)
+
+# 1. Parse the whole messy workbook (3 sheets: JUN, PETTY CASH, NOTES)
+df, notes = parse_workbook(SAMPLE)
+print(f"[parse] {len(df)} rows from sheets: {notes}")
+assert len(df) == 11, f"expected 11 rows (9 JUN + 2 petty cash), got {len(df)}"
+assert any("NOTES" in n and "skipped" in n for n in notes), "NOTES sheet should be skipped"
+assert abs(df["amount"].sum() - 2385.65) < 0.01, df["amount"].sum()
+
+# 2. Classify (offline fallback without API key)
+coded = classify(df, ctx, store)
+print(f"[classify] sources: {coded['source'].value_counts().to_dict()}")
+
+# 3. Simulate bookkeeper coding (what the UI edit step does)
+approved_coding = {
+    "Ampang Hardware": ("300-A001", "610-000", "NR"),
+    "kedai ah seng": ("300-K004", "908-000", "NR"),
+    "Kedai Ah Seng": ("300-K004", "908-000", "NR"),
+    "City Petrol": ("300-C003", "903-000", "NR"),
+    "City Petrol Station": ("300-C003", "903-000", "NR"),
+    "Maxis": ("300-M005", "904-000", "P"),
+    "TNB": ("300-T006", "905-000", "PE"),
+    "Best Office Supplies": ("300-B002", "902-000", "P"),
+    "Percetakan Maju": ("300-S007", "906-000", "P"),
+    "ampang hardware sdn bhd": ("300-A001", "610-000", "NR"),
+}
+for i, row in coded.iterrows():
+    sc, ac, tc = approved_coding[row["supplier"]]
+    coded.loc[i, ["supplier_code", "account_code", "tax_code"]] = [sc, ac, tc]
+
+# 4. Validate — clean batch should have no errors
+issues = validate_batch(coded, ctx, registry.keys)
+counts = summarize(issues)
+print(f"[validate] clean batch: {counts}")
+assert counts["error"] == 0, issues[issues.severity == "error"]
+
+# 4b. Validation catches garbage: bad codes, dup rows, absurd tax, future date
+import datetime as dt
+bad = coded.copy()
+bad.loc[0, "account_code"] = "999-XXX"          # unknown account
+bad.loc[1, "tax"] = bad.loc[1, "amount"] + 10   # tax > amount
+bad.loc[2, "date"] = dt.date.today() + dt.timedelta(days=90)  # future
+dup = bad.iloc[[3]].copy()                       # duplicate of row 3
+bad = __import__("pandas").concat([bad, dup], ignore_index=True)
+issues_bad = validate_batch(bad, ctx, registry.keys)
+codes_found = set(issues_bad["code"])
+print(f"[validate] dirty batch issues: {sorted(codes_found)}")
+for expected in ("UNKNOWN_ACCOUNT", "TAX_EXCEEDS_AMOUNT", "DATE_FUTURE", "DUP_IN_BATCH"):
+    assert expected in codes_found, f"missing check: {expected}"
+
+# 5. Learn + post (dry run, recorded in registry)
+for _, r in coded.iterrows():
+    store.learn(r["supplier"], r["supplier_code"], r["account_code"], r["tax_code"])
+store.save()
+result = post_batch(coded, SQLConfig(dry_run=True), out_dir=ROOT / "posted",
+                    registry=registry)
+print(f"[post] {result['mode']}: {result['invoices']} invoices, {result['lines']} lines")
+
+# 6. Dedup guard: same batch again must trigger DUP_POSTED on every line
+registry2 = PostedRegistry(DATA)
+issues_rerun = validate_batch(coded, ctx, registry2.keys)
+n_dup = int((issues_rerun["code"] == "DUP_POSTED").sum())
+print(f"[dedup] re-submitting the same batch flags {n_dup}/{len(coded)} lines")
+assert n_dup == len(coded), "dedup guard failed"
+
+# 7. Flywheel: fresh parse should auto-code 100% from learned rules
+coded2 = classify(parse_workbook(SAMPLE)[0], ctx, RuleStore(DATA))
+rule_hits = int((coded2["source"] == "rule").sum())
+print(f"[flywheel] second pass: {rule_hits}/{len(coded2)} auto-coded from rules")
+assert rule_hits == len(coded2)
+
+# 8. Majority-vote rules: one odd correction must not flip an established rule
+store3 = RuleStore(DATA)
+store3.learn("Ampang Hardware", "300-A001", "907-000", "NR")  # the odd one out
+rule = store3.lookup("ampang hardware sdn bhd")
+print(f"[rules] majority coding after odd correction: {rule['account_code']} "
+      f"({rule['consistency']:.0%} consistent)")
+assert rule["account_code"] == "610-000", "majority vote failed"
+assert rule["consistency"] < 1.0
+
+print("\nALL PIPELINE TESTS PASSED")

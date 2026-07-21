@@ -1,0 +1,19 @@
+# Kira Agent config — lives on the PC where SQL Accounting is installed.
+server_url: http://localhost:8600
+agent_token: dev-agent-token-change-me
+agent_name: office-pc-1
+poll_seconds: 30
+
+clients:
+  DEMO_CLIENT:
+    dry_run: true          # set false only against a BACKUP company first
+    user: ADMIN
+    password: ADMIN
+    dcf_path: 'C:\eStream\SQLAccounting\Share\Default.DCF'
+    fdb_name: 'ACC-0001.FDB'
+  SRI_MURNI_TRADING:
+    dry_run: true
+    user: ADMIN
+    password: ADMIN
+    dcf_path: 'C:\eStream\SQLAccounting\Share\Default.DCF'
+    fdb_name: 'ACC-0002.FDB'

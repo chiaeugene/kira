@@ -1,0 +1,10 @@
+# Kira theme — Apple-style neutrals, single restrained green accent.
+[theme]
+primaryColor = "#157A5B"
+backgroundColor = "#FBFBFD"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1D1D1F"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"

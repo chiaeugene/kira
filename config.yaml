@@ -1,0 +1,29 @@
+# Kira configuration.
+# mode: local  -> console posts straight into SQL on this PC (pilot)
+# mode: cloud  -> console queues approved batches; the Kira Agent on the
+#                 SQL PC picks them up and posts (product architecture)
+mode: cloud
+
+server:
+  firm_token: dev-firm-token-change-me
+  agent_token: dev-agent-token-change-me
+
+client:
+  name: DEMO_CLIENT
+  # Folder holding this client's master data exports (chart_of_accounts.csv,
+  # suppliers.csv, tax_codes.csv) and learned rules.json
+  data_dir: client_data/DEMO_CLIENT
+
+sql:
+  # Set dry_run: false ONLY on the machine where SQL Accounting is installed
+  # and you are pointing at a BACKUP copy of the client's database.
+  dry_run: true
+  user: ADMIN
+  password: ADMIN
+  dcf_path: 'C:\eStream\SQLAccounting\Share\Default.DCF'
+  fdb_name: 'ACC-0001.FDB'
+
+llm:
+  model: claude-opus-4-8
+  batch_size: 20          # rows per classification call
+  max_tokens: 16000
