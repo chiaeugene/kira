@@ -9,8 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-os.environ["KIRA_API_URL"] = "http://localhost:8600"
-os.environ["KIRA_FIRM_TOKEN"] = "dev-firm-token-change-me"
+# Defaults target a local dev server; set the env vars first to smoke-test a
+# real deployment (e.g. Render).
+os.environ.setdefault("KIRA_API_URL", "http://localhost:8600")
+os.environ.setdefault("KIRA_FIRM_TOKEN", "dev-firm-token-change-me")
 
 from kira.api_client import KiraAPI
 from kira.batches import records_to_df, rows_to_records
@@ -54,15 +56,19 @@ assert any(p["batch_id"] == bid for p in pending)
 b = api.batch(bid)
 rows_df = records_to_df(b["rows"])
 
-# approve with blanks -> conflict surfaced, not crash
+# approve as-received: with AI off the codes are blank -> conflict surfaced;
+# with AI on (deployed key) the codes are real -> approve succeeds.
 res = api.approve(bid, rows_to_records(rows_df))
-assert res.get("_conflict"), res
-print(f"[approve] dirty conflict surfaced: blank_codes={res['blank_codes']}")
-
-# reject instead (also exercises reject path)
-res = api.reject(bid, "remote smoke test")
-assert res["state"] == "rejected"
-print("[reject] ok")
+if res.get("_conflict"):
+    print(f"[approve] dirty conflict surfaced: blank_codes={res['blank_codes']}")
+    res = api.reject(bid, "remote smoke test")
+    assert res["state"] == "rejected"
+    print("[reject] ok")
+else:
+    assert res["state"] == "approved", res
+    n_coded = int((rows_df["account_code"] != "").sum())
+    print(f"[approve] AI coded {n_coded}/{len(rows_df)} lines -> approved "
+          "(an Agent poll will post it)")
 
 # dashboards
 ov = api.overview()

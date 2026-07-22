@@ -23,6 +23,10 @@ import streamlit as st
 import yaml
 
 from kira import ui
+from kira.envfile import load_env
+
+load_env()  # .env present -> cloud mode; absent -> local mode
+
 from kira.api_client import KiraAPI, remote_url
 from kira.batches import (BatchStore, records_to_df, rows_to_records,
                           source_channel)

@@ -37,6 +37,10 @@ from kira.poster import SQLConfig, post_batch
 
 import os
 
+from kira.envfile import load_env
+
+load_env()  # .env can carry KIRA_SERVER_URL / KIRA_AGENT_TOKEN
+
 
 def load_cfg(path: str = "agent_config.yaml") -> dict:
     cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
