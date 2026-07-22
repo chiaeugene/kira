@@ -243,8 +243,13 @@ def main() -> int:
     banner(cfg)
 
     if args.once:
-        log.info("Single poll -> %s", poll_once(cfg))
-        return 0
+        try:
+            log.info("Single poll -> %s", poll_once(cfg))
+            return 0
+        except Exception as e:
+            log.error("Could not reach Kira Cloud: %s", e)
+            log.error("(Server may be restarting — try again in a minute.)")
+            return 1
 
     idle_streak = 0
     while True:
