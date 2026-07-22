@@ -9,9 +9,7 @@ services:
   - type: web
     name: kira-cloud
     runtime: python
-    plan: free                 # free tier sleeps after idle + storage resets on
-                               # deploy — fine for trials. For real use: plan
-                               # starter + uncomment the disk block below.
+    plan: starter              # no idle sleep; supports the persistent disk
     buildCommand: pip install -r requirements.txt
     startCommand: bash scripts/render_start.sh
     healthCheckPath: /api/health
@@ -24,8 +22,9 @@ services:
         generateValue: true
       - key: ANTHROPIC_API_KEY
         sync: false            # set later in the dashboard to enable AI coding
-    # --- persistent storage (requires a paid plan) ---
-    # disk:
-    #   name: kira-data
-    #   mountPath: /var/data
-    #   sizeGB: 1
+    # Persistent state: batches, learned rules, audit trails survive deploys.
+    # scripts/render_start.sh detects the mount and moves state onto it.
+    disk:
+      name: kira-data
+      mountPath: /var/data
+      sizeGB: 1                # ~USD 0.25/month; grow later if ever needed
