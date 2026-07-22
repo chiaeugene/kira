@@ -308,14 +308,19 @@ def clients_list():
     return out
 
 
+def _json_records(df: pd.DataFrame) -> list[dict]:
+    """DataFrame -> JSON-safe records (NaN becomes null, numpy types unwrap)."""
+    return json.loads(df.to_json(orient="records")) if not df.empty else []
+
+
 @app.get("/api/clients/{client}/history", dependencies=[Depends(firm_auth)])
 def client_history(client: str):
     _require_client(client)
     _ctx, rules, audit = open_client(client)
     log = audit.read()
-    batches_log = (log[log["event"] == "batch_posted"].to_dict(orient="records")
+    batches_log = (_json_records(log[log["event"] == "batch_posted"])
                    if not log.empty else [])
-    corrections = (log[log["event"] == "correction"].to_dict(orient="records")
+    corrections = (_json_records(log[log["event"] == "correction"])
                    if not log.empty else [])
     rule_rows = []
     for key, entry in rules.rules.items():
