@@ -343,3 +343,29 @@ def overview():
 @app.get("/api/health")
 def health():
     return {"ok": True, "clients": len(list_clients()), "ai": llm_available()}
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("""<!doctype html><html><head><meta charset="utf-8">
+<title>Kira Cloud</title><meta name="robots" content="noindex">
+<style>
+ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,
+   sans-serif;background:#FBFBFD;color:#1D1D1F;display:flex;min-height:100vh;
+   align-items:center;justify-content:center;margin:0}
+ .card{text-align:center;padding:48px}
+ h1{font-size:44px;font-weight:700;letter-spacing:-.03em;margin:0}
+ h1 span{color:#157A5B}
+ p{color:#6E6E73;font-size:16px;line-height:1.6;max-width:44ch;margin:14px auto 0}
+ code{background:#F5F5F7;border-radius:6px;padding:2px 8px;font-size:14px}
+ .ok{display:inline-block;margin-top:22px;font-size:14px;color:#157A5B;
+   border:1px solid #157A5B33;border-radius:999px;padding:6px 16px}
+</style></head><body><div class="card">
+<h1>Kira<span>.</span></h1>
+<p>This is the Kira Cloud API — the engine that turns bookkeepers' Excel and
+documents into posted SQL Accounting entries. There is nothing to click here:
+bookkeepers use the Kira console, and the office Agent connects automatically.</p>
+<p>Service check: <code>/api/health</code></p>
+<div class="ok">Kira Cloud is running</div>
+</div></body></html>""")
