@@ -3,6 +3,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# PyInstaller build artifacts (KiraAgent.exe is distributed, not committed)
+build/
+dist/
+*.spec
+kira_agent.log
+
 # Runtime state — never commit a firm's data
 batches/
 posted/
