@@ -1,13 +1,30 @@
-# Kira — firm console (Phase-0+)
+# Kira — firm console
 
 Turns **anything a bookkeeper receives** — messy Excel books (any layout,
 multi-sheet, English/Malay/Chinese headers), CSVs, PDF invoices, receipt
-photos — into coded, validated, reviewed **Purchase Invoices posted into SQL
-Accounting** via the free official SDK. Built for firms running many client
-books side by side.
+photos — into coded, validated, reviewed entries **posted into the correct
+SQL Accounting module** via the free official SDK. Built for firms running
+many client books side by side.
 
-Pipeline: `drop files → parse/extract → classify (rules → Claude → fallback)
-→ validate (dups, tax math, dates, master codes) → review → learn → post`
+Every line carries a `doc_type` that routes it to the right spot in SQL:
+
+| doc_type | SQL module |
+|---|---|
+| purchase / purchase_return | Purchase Invoice `PH_PI` / Returned `PH_CN` |
+| sale / sales_return | Sales Invoice `SL_IV` / Credit Note `SL_CN` |
+| customer_payment / supplier_payment | `AR_PM` / `AP_PM` |
+| journal | Journal Entry `GL_JE` |
+
+Detection is three-layered: sheet/title/header keywords give a hint → the AI
+decides per line (grounded in the client's own suppliers, customers, chart of
+accounts) → the human can override in review (dropdown per line). Parties are
+validated against the *correct* master (customers for sales-side, suppliers
+for purchase-side), account kinds are sanity-checked (sales → income accounts,
+payments → bank/cash), and a line with no doc_type can never post.
+
+Pipeline: `drop files → parse/extract (+doc-type hints) → classify (rules →
+Claude → fallback) → validate (dups, tax math, dates, masters, account kinds)
+→ suggested repairs → review → learn → post to the right module`
 
 What sets it apart from OCR-to-CSV tools:
 - **Excel-first**: reads the bookkeeper's own book, however messy; AI maps

@@ -10,6 +10,20 @@ if [ -d /var/data ]; then
     cp -r client_data /var/data/client_data
     mkdir -p /var/data/batches /var/data/posted
     touch /var/data/.seeded
+  else
+    # Sync master/reference data from the repo on every deploy (new clients,
+    # new master files, updated demo masters) WITHOUT touching learned state
+    # (rules.json, audit.jsonl, posted_registry.json, file_log.json stay).
+    for dir in client_data/*/; do
+      name=$(basename "$dir")
+      mkdir -p "/var/data/client_data/$name"
+      for f in chart_of_accounts.csv suppliers.csv customers.csv tax_codes.csv; do
+        [ -f "$dir$f" ] && cp -f "$dir$f" "/var/data/client_data/$name/$f"
+      done
+    done
+    for f in client_data/*.yaml; do
+      [ -f "$f" ] && cp -f "$f" "/var/data/client_data/$(basename "$f")"
+    done
   fi
   rm -rf client_data batches posted
   ln -s /var/data/client_data client_data
