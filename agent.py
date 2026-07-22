@@ -56,7 +56,7 @@ def load_cfg(path: str = "agent_config.yaml") -> dict:
 
 def banner(cfg: dict) -> None:
     log.info("=" * 62)
-    log.info("KIRA AGENT — %s", cfg.get("agent_name", "agent"))
+    log.info("KIRA AGENT - %s", cfg.get("agent_name", "agent"))
     log.info("Cloud:   %s", cfg["server_url"])
     log.info("Polling: every %ss", cfg.get("poll_seconds", 30))
     for name, c in cfg["clients"].items():
