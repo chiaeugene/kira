@@ -1,12 +1,12 @@
 # Deploying Kira
 
-Three moving parts. Only the first one lives in the cloud.
+Three moving parts — the first two live in the cloud.
 
-| Part | Where it runs | How |
+| Part | Where it runs | URL / How |
 |---|---|---|
-| Kira Cloud (API) | Render | one-click Blueprint (below) |
-| Console (UI) | your laptop / any PC | `streamlit run app.py` + 2 env vars |
-| Kira Agent | the office PC with SQL Accounting | `python agent.py` |
+| Kira Cloud (API) | Render (starter + disk) | https://kira-cloud.onrender.com |
+| Console (UI) | Render (free) — or any PC | https://kira-console.onrender.com — password in the kira-console service's Environment tab (`KIRA_CONSOLE_PASSWORD`); local: `Kira Console.bat` |
+| Kira Agent | the office PC with SQL Accounting | `KiraAgent.exe` (see AGENT_SETUP.md) |
 
 ## 1. Kira Cloud on Render (~3 minutes, one time)
 
