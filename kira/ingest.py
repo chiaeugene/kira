@@ -36,7 +36,8 @@ COLUMN_PATTERNS: dict[str, list[str]] = {
     ],
     "description": [
         r"desc", r"particular", r"detail", r"item", r"remark", r"perkara",
-        r"keterangan", r"purpose", r"备注", r"事项",
+        r"keterangan", r"purpose", r"kerja", r"barang", r"butiran",
+        r"备注", r"事项", r"项目",
     ],
     "amount": [
         r"amount", r"amt", r"total", r"jumlah", r"harga", r"rm\b", r"value",
