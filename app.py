@@ -14,6 +14,7 @@ Tabs: Convert · Inbox · Connections · Firm overview · Client history
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -42,6 +43,31 @@ from kira.validate import summarize, validate_batch
 
 st.set_page_config(page_title="Kira", page_icon="assets/favicon.svg", layout="wide")
 ui.inject()
+
+# ---- login gate (active only when KIRA_CONSOLE_PASSWORD is set, i.e. the
+# hosted console; a locally-run console stays password-free) ----
+_CONSOLE_PW = os.environ.get("KIRA_CONSOLE_PASSWORD")
+if _CONSOLE_PW and not st.session_state.get("authed"):
+    st.markdown(
+        '<div style="text-align:center;margin-top:14vh">'
+        '<div style="font-size:44px;font-weight:700;letter-spacing:-.03em">'
+        'Kira<span style="color:#157A5B">.</span></div>'
+        '<p style="color:#6E6E73">Sign in to the firm console</p></div>',
+        unsafe_allow_html=True)
+    _c1, _c2, _c3 = st.columns([1, 1, 1])
+    with _c2:
+        with st.form("login"):
+            pw_try = st.text_input("Password", type="password",
+                                   label_visibility="collapsed",
+                                   placeholder="Password")
+            if st.form_submit_button("Sign in", type="primary",
+                                     use_container_width=True):
+                if pw_try == _CONSOLE_PW:
+                    st.session_state.authed = True
+                    st.rerun()
+                else:
+                    st.error("Wrong password.")
+    st.stop()
 
 CONFIG = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
 LLM = CONFIG["llm"]

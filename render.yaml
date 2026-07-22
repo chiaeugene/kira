@@ -28,3 +28,27 @@ services:
       name: kira-data
       mountPath: /var/data
       sizeGB: 1                # ~USD 0.25/month; grow later if ever needed
+
+  # ---- the hosted console: same Streamlit app, remote mode, password gate ----
+  - type: web
+    name: kira-console
+    runtime: python
+    plan: free                 # stateless (all data lives in kira-cloud), so
+                               # free is fine; sleeps when idle (~1 min wake).
+                               # Upgrade to starter if the wake-up annoys you.
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: KIRA_API_URL
+        value: https://kira-cloud.onrender.com
+      - key: KIRA_FIRM_TOKEN
+        fromService:           # shared from kira-cloud — never typed anywhere
+          type: web
+          name: kira-cloud
+          envVarKey: KIRA_FIRM_TOKEN
+      - key: KIRA_CONSOLE_PASSWORD
+        generateValue: true    # read it in the Environment tab; change it to
+                               # something memorable if you prefer
