@@ -244,8 +244,12 @@ def parse_purchase_listing(path: str | Path, sheet: int | str = 0) -> pd.DataFra
     for i, row in body.iterrows():
         rec = {canon: row.iloc[idx] for idx, canon in mapping.items()}
 
-        # Repeated header rows (books re-print headers at page breaks)
-        if _score_header_row(list(row)) >= 2:
+        # Repeated header rows (books re-print headers at page breaks).
+        # A real header row has header-like words AND no parsable amount —
+        # data rows can contain header-ish words (e.g. 'barang' as a
+        # description), so the amount check is what separates them.
+        if (_score_header_row(list(row)) >= 2
+                and _clean_amount(rec.get("amount")) is None):
             continue
 
         # TOTAL / subtotal / balance rows: skip, but capture the declared
