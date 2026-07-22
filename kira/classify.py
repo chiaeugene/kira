@@ -1,10 +1,24 @@
-"""Classification: map each purchase row to this client's supplier code,
-expense account code, and tax code.
+"""Classification: decide what each line IS (doc_type) and where it goes —
+party code, account code, tax code — against this client's own masters.
+
+Document types:
+  purchase          supplier bill / expense        -> SQL Purchase Invoice
+  purchase_return   credit note from a supplier    -> SQL Purchase Return
+  sale              invoice issued to a customer   -> SQL Sales Invoice
+  sales_return      credit note to a customer      -> SQL Sales Credit Note
+  customer_payment  money received from a customer -> SQL Customer Payment
+  supplier_payment  money paid to a supplier       -> SQL Supplier Payment
+  journal           everything else (adjustments)  -> SQL Journal Entry
 
 Order of authority per row:
-  1. Learned rule (exact normalized supplier match)  -> high confidence
-  2. Claude (grounded in the client's real COA/suppliers/tax codes)
-  3. Heuristic fallback (fuzzy supplier match) when no API credentials
+  1. Learned rule (doc_type + normalized party)  -> high confidence
+  2. Claude (grounded in the client's masters + per-sheet doc-type hints)
+  3. Heuristic fallback (hint doc_type + fuzzy party) when no API credentials
+
+Column semantics: `supplier` holds the PARTY NAME (supplier or customer);
+`supplier_code` holds the PARTY CODE from the matching master.
+`account_code` is the other side of the entry: expense/COGS account for
+purchases, income account for sales, bank/cash account for payments.
 """
 
 from __future__ import annotations
@@ -18,6 +32,9 @@ import pandas as pd
 from .context import ClientContext
 from .rules import RuleStore, normalize_supplier
 
+DOC_TYPES = ["purchase", "purchase_return", "sale", "sales_return",
+             "customer_payment", "supplier_payment", "journal"]
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -27,16 +44,15 @@ SCHEMA = {
                 "type": "object",
                 "properties": {
                     "row_id": {"type": "integer"},
-                    "supplier_code": {"type": "string"},
+                    "doc_type": {"type": "string", "enum": DOC_TYPES},
+                    "party_code": {"type": "string"},
                     "account_code": {"type": "string"},
                     "tax_code": {"type": "string"},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "reason": {"type": "string"},
                 },
-                "required": [
-                    "row_id", "supplier_code", "account_code",
-                    "tax_code", "confidence", "reason",
-                ],
+                "required": ["row_id", "doc_type", "party_code", "account_code",
+                             "tax_code", "confidence", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -45,17 +61,37 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
-SYSTEM_PROMPT = """You are an expert Malaysian bookkeeper coding purchase transactions \
-into SQL Accounting for a specific client. You are given the client's actual chart of \
-accounts, supplier master, and tax codes. For each transaction row, choose:
-- supplier_code: the best match from the supplier master ("" if no plausible match — a new supplier)
-- account_code: the most appropriate expense/purchase account FROM THE CLIENT'S LIST ONLY
-- tax_code: the most appropriate tax code from the client's list
-- confidence: high (certain), medium (plausible), low (guessing / needs human review)
-- reason: one short sentence
+SYSTEM_PROMPT = """You are an expert Malaysian bookkeeper sorting a client's mixed \
+records into SQL Accounting. For each transaction line decide:
 
-Descriptions may be in English, Malay, or Chinese. Never invent codes that are not in \
-the provided lists. If unsure, pick your best candidate and mark confidence low."""
+1. doc_type — what this line IS:
+   - purchase: a supplier bill or expense the business incurred
+   - purchase_return: goods returned to a supplier / supplier credit note
+   - sale: an invoice the business issued to its customer
+   - sales_return: goods returned by a customer / credit note issued
+   - customer_payment: money RECEIVED from a customer (receipt, collection)
+   - supplier_payment: money PAID to a supplier (payment voucher)
+   - journal: adjustments that fit none of the above
+   A doc_type_hint from the sheet's own title/headers is given when available —
+   follow it unless the line clearly contradicts it.
+
+2. party_code — the code of the party FROM THE CORRECT MASTER:
+   suppliers/creditors for purchase, purchase_return, supplier_payment;
+   customers/debtors for sale, sales_return, customer_payment.
+   "" if no plausible match (a new party).
+
+3. account_code — the other side of the entry, FROM THE CHART OF ACCOUNTS ONLY:
+   expense/cost account for purchases; income/sales account for sales;
+   BANK or CASH account for payments (which account the money moved through);
+   the adjustment account for journals.
+
+4. tax_code — from the client's tax code list ("" if none applies).
+
+5. confidence: high (certain) / medium (plausible) / low (needs human review).
+6. reason: one short sentence.
+
+Descriptions may be in English, Malay, or Chinese. Never invent codes. When
+unsure of doc_type, prefer the hint; if there is no hint, mark confidence low."""
 
 
 def _llm_available() -> bool:
@@ -65,8 +101,9 @@ def _llm_available() -> bool:
 def _classify_batch_llm(client, model: str, max_tokens: int,
                         context_block: str, rows: list[dict]) -> dict[int, dict]:
     rows_text = "\n".join(
-        f"row_id={r['row_id']} | date={r['date']} | supplier={r['supplier']} | "
-        f"desc={r['description']} | amount={r['amount']} | tax={r['tax']}"
+        f"row_id={r['row_id']} | hint={r.get('doc_type_hint', '') or 'none'} | "
+        f"date={r['date']} | party={r['supplier']} | desc={r['description']} | "
+        f"amount={r['amount']} | tax={r['tax']}"
         for r in rows
     )
     with client.messages.stream(
@@ -78,23 +115,28 @@ def _classify_batch_llm(client, model: str, max_tokens: int,
             "cache_control": {"type": "ephemeral"},
         }],
         output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
-        messages=[{"role": "user", "content": "Code these purchase rows:\n" + rows_text}],
+        messages=[{"role": "user",
+                   "content": "Sort and code these lines:\n" + rows_text}],
     ) as stream:
         response = stream.get_final_message()
     text = next(b.text for b in response.content if b.type == "text")
     return {r["row_id"]: r for r in json.loads(text)["rows"]}
 
 
-def _fuzzy_supplier(name: str, ctx: ClientContext) -> tuple[str, float]:
-    """Heuristic fallback: fuzzy-match supplier name against the master."""
-    if ctx.suppliers.empty or not name:
+def _party_master(ctx: ClientContext, doc_type: str) -> pd.DataFrame:
+    if doc_type in ("sale", "sales_return", "customer_payment"):
+        return ctx.customers
+    return ctx.suppliers
+
+
+def _fuzzy_party(name: str, master: pd.DataFrame) -> tuple[str, float]:
+    if master is None or master.empty or not name:
         return "", 0.0
     target = normalize_supplier(name)
     best_code, best_score = "", 0.0
-    for _, r in ctx.suppliers.iterrows():
+    for _, r in master.iterrows():
         score = difflib.SequenceMatcher(
-            None, target, normalize_supplier(r["name"])
-        ).ratio()
+            None, target, normalize_supplier(r["name"])).ratio()
         if score > best_score:
             best_code, best_score = r["code"], score
     return (best_code, best_score) if best_score >= 0.75 else ("", best_score)
@@ -103,19 +145,24 @@ def _fuzzy_supplier(name: str, ctx: ClientContext) -> tuple[str, float]:
 def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
              model: str = "claude-opus-4-8", batch_size: int = 20,
              max_tokens: int = 16000) -> pd.DataFrame:
-    """Return df with added columns: supplier_code, account_code, tax_code,
-    confidence, source, reason."""
+    """Return df with added columns: doc_type, supplier_code (= party code),
+    account_code, tax_code, confidence, source, reason."""
     out = df.copy().reset_index(drop=True)
-    for col in ("supplier_code", "account_code", "tax_code", "confidence", "source", "reason"):
+    if "doc_type_hint" not in out.columns:
+        out["doc_type_hint"] = ""
+    for col in ("doc_type", "supplier_code", "account_code", "tax_code",
+                "confidence", "source", "reason"):
         out[col] = ""
 
-    # Pass 1 — learned rules
+    # Pass 1 — learned rules (need a known doc_type to pick the rule space)
     pending: list[int] = []
     for i, row in out.iterrows():
-        rule = store.lookup(row["supplier"])
+        hint = str(row.get("doc_type_hint", "") or "")
+        rule = store.lookup(row["supplier"], hint) if hint else None
         if rule:
-            out.loc[i, ["supplier_code", "account_code", "tax_code"]] = [
-                rule["supplier_code"], rule["account_code"], rule["tax_code"]]
+            out.loc[i, ["doc_type", "supplier_code", "account_code",
+                        "tax_code"]] = [hint, rule["supplier_code"],
+                                        rule["account_code"], rule["tax_code"]]
             conf = "high" if rule.get("consistency", 1.0) >= 0.8 else "medium"
             out.loc[i, ["confidence", "source", "reason"]] = [
                 conf, "rule",
@@ -132,32 +179,35 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
         import anthropic
         client = anthropic.Anthropic()
         context_block = ctx.as_prompt_block()
-        batch_rows = [
-            {"row_id": i, **out.loc[i, ["date", "supplier", "description",
-                                        "amount", "tax"]].to_dict()}
-            for i in pending
-        ]
+        cols = ["date", "supplier", "description", "amount", "tax",
+                "doc_type_hint"]
+        batch_rows = [{"row_id": i, **out.loc[i, cols].to_dict()}
+                      for i in pending]
         for start in range(0, len(batch_rows), batch_size):
             chunk = batch_rows[start:start + batch_size]
-            results = _classify_batch_llm(client, model, max_tokens, context_block, chunk)
+            results = _classify_batch_llm(client, model, max_tokens,
+                                          context_block, chunk)
             for r in chunk:
                 res = results.get(r["row_id"])
                 if res is None:
                     continue
                 i = r["row_id"]
-                out.loc[i, ["supplier_code", "account_code", "tax_code"]] = [
-                    res["supplier_code"], res["account_code"], res["tax_code"]]
+                out.loc[i, ["doc_type", "supplier_code", "account_code",
+                            "tax_code"]] = [res["doc_type"], res["party_code"],
+                                            res["account_code"], res["tax_code"]]
                 out.loc[i, ["confidence", "source", "reason"]] = [
                     res["confidence"], "llm", res["reason"]]
         return out
 
     # Pass 3 — offline heuristic fallback (no API credentials)
     for i in pending:
-        code, score = _fuzzy_supplier(out.loc[i, "supplier"], ctx)
+        hint = str(out.loc[i, "doc_type_hint"] or "") or "purchase"
+        out.loc[i, "doc_type"] = hint
+        code, score = _fuzzy_party(out.loc[i, "supplier"],
+                                   _party_master(ctx, hint))
         out.loc[i, "supplier_code"] = code
         out.loc[i, ["confidence", "source"]] = ["low", "fallback"]
         out.loc[i, "reason"] = (
-            f"offline fallback, fuzzy supplier match {score:.0%} — set "
-            "ANTHROPIC_API_KEY for AI coding"
-        )
+            f"offline fallback ({hint}), fuzzy party match {score:.0%} — set "
+            "ANTHROPIC_API_KEY for AI coding")
     return out

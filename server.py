@@ -128,7 +128,8 @@ async def _ingest_uploads(client: str, files: list[UploadFile],
                          "is off (no ANTHROPIC_API_KEY on the server)")
         else:
             extracted = extract_documents(docs, model=LLM["model"],
-                                          max_tokens=LLM["max_tokens"])
+                                          max_tokens=LLM["max_tokens"],
+                                          client_name=client)
             frames.append(extracted)
             notes.append(f"{len(docs)} document file(s) -> {len(extracted)} entries")
             for name, data in docs:

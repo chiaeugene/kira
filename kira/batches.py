@@ -33,9 +33,10 @@ def source_channel(batch: dict) -> str:
         return "whatsapp"
     return "upload"
 
-ROW_COLS = ["row_id", "date", "supplier", "description", "amount", "tax",
-            "doc_no", "supplier_code", "account_code", "tax_code",
-            "confidence", "source", "reason", "source_row"]
+ROW_COLS = ["row_id", "doc_type", "date", "supplier", "description", "amount",
+            "tax", "doc_no", "supplier_code", "account_code", "tax_code",
+            "contra_account", "confidence", "source", "reason",
+            "doc_type_hint", "source_row"]
 
 
 def ensure_row_ids(df: pd.DataFrame) -> pd.DataFrame:
@@ -62,8 +63,13 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     df["source_row"] = df["source_row"].astype(int)
     if "row_id" in df.columns:
         df["row_id"] = df["row_id"].astype(int)
-    for c in ("supplier_code", "account_code", "tax_code", "doc_no"):
-        df[c] = df[c].fillna("").astype(str)
+    for c in ("supplier_code", "account_code", "tax_code", "doc_no",
+              "contra_account", "doc_type", "doc_type_hint"):
+        if c in df.columns:
+            df[c] = df[c].fillna("").astype(str)
+        else:
+            df[c] = ""
+    df["doc_type"] = df["doc_type"].replace("", "purchase")  # legacy batches
     return df
 
 

@@ -27,11 +27,13 @@ def normalize_supplier(name: str) -> str:
 class RuleStore:
     def __init__(self, data_dir: str | Path):
         self.path = Path(data_dir) / "rules.json"
-        # {normalized_supplier: {"votes": {"sup|acct|tax": count}}}
+        # {"doc_type|normalized_party": {"votes": {"party|acct|tax": count}}}
         self.rules: dict[str, dict] = {}
         if self.path.exists():
             data = json.loads(self.path.read_text(encoding="utf-8"))
             for key, val in data.items():
+                if "|" not in key:  # migrate: un-typed keys were purchases
+                    key = f"purchase|{key}"
                 if "votes" in val:
                     self.rules[key] = val
                 else:  # migrate v1 single-coding format
@@ -41,8 +43,12 @@ class RuleStore:
     def __len__(self) -> int:
         return len(self.rules)
 
-    def lookup(self, supplier_name: str) -> dict | None:
-        entry = self.rules.get(normalize_supplier(supplier_name))
+    @staticmethod
+    def _key(supplier_name: str, doc_type: str) -> str:
+        return f"{doc_type or 'purchase'}|{normalize_supplier(supplier_name)}"
+
+    def lookup(self, supplier_name: str, doc_type: str = "purchase") -> dict | None:
+        entry = self.rules.get(self._key(supplier_name, doc_type))
         if not entry or not entry["votes"]:
             return None
         combo, count = max(entry["votes"].items(), key=lambda kv: kv[1])
@@ -57,12 +63,13 @@ class RuleStore:
         }
 
     def learn(self, supplier_name: str, supplier_code: str,
-              account_code: str, tax_code: str) -> None:
-        key = normalize_supplier(supplier_name)
-        if not key:
+              account_code: str, tax_code: str,
+              doc_type: str = "purchase") -> None:
+        if not normalize_supplier(supplier_name):
             return
         combo = f"{supplier_code}|{account_code}|{tax_code}"
-        entry = self.rules.setdefault(key, {"votes": {}})
+        entry = self.rules.setdefault(self._key(supplier_name, doc_type),
+                                      {"votes": {}})
         entry["votes"][combo] = entry["votes"].get(combo, 0) + 1
 
     def save(self) -> None:

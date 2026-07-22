@@ -39,8 +39,14 @@ class Issue:
     row_id: int = -1  # batch-unique line id (targeting); -1 if unavailable
 
 
-def dup_key(supplier_code: str, doc_no: str, amount: float) -> str:
-    return f"{str(supplier_code).strip()}|{str(doc_no).strip().upper()}|{float(amount):.2f}"
+CUSTOMER_SIDE = ("sale", "sales_return", "customer_payment")
+PAYMENT_TYPES = ("customer_payment", "supplier_payment")
+
+
+def dup_key(supplier_code: str, doc_no: str, amount: float,
+            doc_type: str = "purchase") -> str:
+    return (f"{doc_type or 'purchase'}|{str(supplier_code).strip()}|"
+            f"{str(doc_no).strip().upper()}|{float(amount):.2f}")
 
 
 def validate_batch(df: pd.DataFrame, ctx: ClientContext,
@@ -51,8 +57,13 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
     today = dt.date.today()
 
     supplier_codes = set(ctx.suppliers["code"]) if not ctx.suppliers.empty else set()
+    customer_codes = set(ctx.customers["code"]) if not ctx.customers.empty else set()
     account_codes = set(ctx.accounts["code"]) if not ctx.accounts.empty else set()
     tax_codes = set(ctx.tax_codes["code"]) if not ctx.tax_codes.empty else set()
+    account_types: dict[str, str] = {}
+    if not ctx.accounts.empty and "type" in ctx.accounts.columns:
+        account_types = {str(r["code"]): str(r.get("type", "")).upper()
+                         for _, r in ctx.accounts.iterrows()}
     tax_rates: dict[str, float] = {}
     if not ctx.tax_codes.empty and "rate" in ctx.tax_codes.columns:
         for _, r in ctx.tax_codes.iterrows():
@@ -67,8 +78,11 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
     # --- duplicates inside the batch ---
     seen: dict[str, int] = {}
     for _, row in df.iterrows():
-        key = dup_key(row.get("supplier_code", ""), row.get("doc_no", ""), row["amount"])
-        alt = dup_key(row.get("supplier", ""), row.get("date", ""), row["amount"])
+        dtp = str(row.get("doc_type", "") or "purchase")
+        key = dup_key(row.get("supplier_code", ""), row.get("doc_no", ""),
+                      row["amount"], dtp)
+        alt = dup_key(row.get("supplier", ""), row.get("date", ""),
+                      row["amount"], dtp)
         for k in {key, alt}:
             if k in seen:
                 issues.append(Issue(
@@ -88,20 +102,51 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
         a_code = str(row.get("account_code", "")).strip()
         t_code = str(row.get("tax_code", "")).strip()
 
+        dtp = str(row.get("doc_type", "") or "")
+
         def add(sev: str, code: str, msg: str) -> None:
             issues.append(Issue(sev, code, sr, msg, rid_))
 
+        # --- the line must know what it is ---
+        if not dtp:
+            add(SEV_ERROR, "DOC_TYPE_MISSING",
+                "Line has no document type — cannot decide which SQL module "
+                "it belongs to.")
+            dtp = "purchase"
+
         # --- against posted history ---
-        if dup_key(s_code, row.get("doc_no", ""), amount) in posted_keys:
+        if dup_key(s_code, row.get("doc_no", ""), amount, dtp) in posted_keys:
             add(SEV_ERROR, "DUP_POSTED", "Already posted previously for this client.")
 
-        # --- master data checks ---
-        if s_code and supplier_codes and s_code not in supplier_codes:
-            add(SEV_ERROR, "UNKNOWN_SUPPLIER",
-                f"Supplier code '{s_code}' is not in the master.")
+        # --- party checked against the CORRECT master for the doc type ---
+        if dtp in CUSTOMER_SIDE:
+            if s_code and customer_codes and s_code not in customer_codes:
+                add(SEV_ERROR, "UNKNOWN_CUSTOMER",
+                    f"Customer code '{s_code}' is not in the customer master.")
+        else:
+            if s_code and supplier_codes and s_code not in supplier_codes:
+                add(SEV_ERROR, "UNKNOWN_SUPPLIER",
+                    f"Supplier code '{s_code}' is not in the master.")
+
+        # --- account checks: exists + is the right KIND for the doc type ---
         if a_code and account_codes and a_code not in account_codes:
             add(SEV_ERROR, "UNKNOWN_ACCOUNT",
                 f"Account code '{a_code}' is not in the chart of accounts.")
+        elif a_code and account_types.get(a_code):
+            a_type = account_types[a_code]
+            if dtp == "sale" and any(k in a_type for k in ("EXPENSE", "COST")):
+                add(SEV_WARN, "ACCOUNT_TYPE_MISMATCH",
+                    f"Sale coded to '{a_code}' ({a_type}) — expected an "
+                    "income/sales account.")
+            elif dtp == "purchase" and any(k in a_type for k in ("SALES", "INCOME", "REVENUE")):
+                add(SEV_WARN, "ACCOUNT_TYPE_MISMATCH",
+                    f"Purchase coded to '{a_code}' ({a_type}) — expected an "
+                    "expense/cost account.")
+            elif dtp in PAYMENT_TYPES and not any(k in a_type for k in ("BANK", "CASH")):
+                add(SEV_WARN, "ACCOUNT_TYPE_MISMATCH",
+                    f"Payment coded to '{a_code}' ({a_type}) — expected a "
+                    "bank or cash account.")
+
         if t_code and tax_codes and t_code not in tax_codes:
             add(SEV_WARN, "UNKNOWN_TAX",
                 f"Tax code '{t_code}' is not in the tax code list.")

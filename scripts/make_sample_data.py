@@ -35,9 +35,23 @@ pd.DataFrame(
         ("906-000", "PRINTING & ADVERTISING", "EXPENSE"),
         ("907-000", "GENERAL EXPENSES", "EXPENSE"),
         ("908-000", "STAFF REFRESHMENT", "EXPENSE"),
+        ("500-000", "SALES - GOODS", "SALES"),
+        ("501-000", "SALES - SERVICES & REPAIR", "SALES"),
+        ("310-001", "MAYBANK CURRENT ACCOUNT", "BANK"),
+        ("320-000", "CASH IN HAND", "CASH"),
     ],
     columns=["code", "description", "type"],
 ).to_csv(DATA / "chart_of_accounts.csv", index=False)
+
+pd.DataFrame(
+    [
+        ("400-D001", "DELIMA CONSTRUCTION SDN BHD"),
+        ("400-E002", "ENCIK RAHMAN (RUMAH TAMAN SERI)"),
+        ("400-F003", "FONG BROTHERS ENTERPRISE"),
+        ("400-G004", "GEMILANG CAFE"),
+    ],
+    columns=["code", "name"],
+).to_csv(DATA / "customers.csv", index=False)
 
 pd.DataFrame(
     [
@@ -82,11 +96,34 @@ with pd.ExcelWriter(INBOX / "june_purchases_MAJU_JAYA.xlsx") as xw:
     pd.DataFrame([["reminder: chase supplier statements"]]).to_excel(
         xw, sheet_name="NOTES", index=False, header=False)
 
+# --- mixed sales + receipts workbook (multi-module conversion) --------------
+sales_rows = [
+    ["MAJU JAYA - SALES INVOICES JUN 2026", None, None, None, None],
+    ["Tarikh", "Pelanggan", "Kerja / Barang", "No. Invois", "Jumlah RM"],
+    ["4/6/2026", "Delima Construction", "supply cement & sand", "MJ-1001", "2,850.00"],
+    ["9/6/2026", "En. Rahman", "repair pagar rumah", "MJ-1002", "480.00"],
+    ["16/6/2026", "Fong Brothers", "hardware supplies", "MJ-1003", "1,260.50"],
+    ["TOTAL", None, None, None, "4,590.50"],
+]
+receipt_rows = [
+    ["RESIT RASMI / PAYMENT RECEIVED", None, None, None],
+    ["Date", "Received From", "Ref", "Amount"],
+    ["12/6/2026", "Delima Construction", "OR-201", "2,850.00"],
+    ["20/6/2026", "Gemilang Cafe", "OR-202", "150.00"],
+]
+with pd.ExcelWriter(INBOX / "june_sales_MAJU_JAYA.xlsx") as xw:
+    pd.DataFrame(sales_rows).to_excel(xw, sheet_name="SALES JUN",
+                                      index=False, header=False)
+    pd.DataFrame(receipt_rows).to_excel(xw, sheet_name="RESIT",
+                                        index=False, header=False)
+
 # --- second client so the firm dashboard shows the multi-client story --------
 DATA2 = ROOT / "client_data" / "SRI_MURNI_TRADING"
 DATA2.mkdir(parents=True, exist_ok=True)
-for f in ("suppliers.csv", "chart_of_accounts.csv", "tax_codes.csv"):
+for f in ("suppliers.csv", "chart_of_accounts.csv", "tax_codes.csv",
+          "customers.csv"):
     (DATA2 / f).write_bytes((DATA / f).read_bytes())
 
 print(f"Masters  -> {DATA} and {DATA2}")
-print(f"Sample   -> {INBOX / 'june_purchases_MAJU_JAYA.xlsx'} (3 sheets)")
+print(f"Samples  -> {INBOX / 'june_purchases_MAJU_JAYA.xlsx'} (3 sheets), "
+      f"{INBOX / 'june_sales_MAJU_JAYA.xlsx'} (sales + receipts)")

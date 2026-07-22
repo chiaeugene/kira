@@ -46,14 +46,14 @@ def approve_batch(store: BatchStore, batch: dict,
     for _, r in rows.iterrows():
         o = orig.get(key(r))
         if o:
-            for f in ("supplier_code", "account_code", "tax_code"):
+            for f in ("doc_type", "supplier_code", "account_code", "tax_code"):
                 if str(o.get(f, "")) != str(r[f]):
                     n_corr += 1
                     audit.log_correction(int(r["source_row"]), str(r["supplier"]),
                                          f, o.get(f, ""), r[f],
                                          str(r.get("source", "")))
-        rules.learn(r["supplier"], r["supplier_code"],
-                    r["account_code"], r["tax_code"])
+        rules.learn(r["supplier"], r["supplier_code"], r["account_code"],
+                    r["tax_code"], str(r.get("doc_type", "") or "purchase"))
     rules.save()
 
     store.update_rows(batch["id"], rows)

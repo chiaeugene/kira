@@ -47,6 +47,14 @@ def propose_fixes(rows: pd.DataFrame, issues: pd.DataFrame,
     by_rid = {rid_of(r): r for _, r in rows.iterrows()}
     suppliers = [(str(r["code"]), normalize_supplier(r["name"]))
                  for _, r in ctx.suppliers.iterrows()] if not ctx.suppliers.empty else []
+    customers = [(str(r["code"]), normalize_supplier(r["name"]))
+                 for _, r in ctx.customers.iterrows()] if not ctx.customers.empty else []
+
+    def party_master_for(row) -> list[tuple[str, str]]:
+        if str(row.get("doc_type", "")) in ("sale", "sales_return",
+                                            "customer_payment"):
+            return customers
+        return suppliers
     accounts = [(str(r["code"]), str(r["code"]))
                 for _, r in ctx.accounts.iterrows()] if not ctx.accounts.empty else []
     taxes = [(str(r["code"]), str(r["code"]))
@@ -79,11 +87,14 @@ def propose_fixes(rows: pd.DataFrame, issues: pd.DataFrame,
             add(rid, sr, code, "__drop__", "(line kept)", "remove line",
                 "Identical to an entry already in this batch or already posted.")
 
-        elif code == "UNKNOWN_SUPPLIER" and suppliers:
-            m = _best_match(normalize_supplier(row["supplier"]), suppliers)
+        elif code in ("UNKNOWN_SUPPLIER", "UNKNOWN_CUSTOMER"):
+            master = party_master_for(row)
+            m = _best_match(normalize_supplier(row["supplier"]), master) \
+                if master else None
             if m:
+                kind = "customer" if code == "UNKNOWN_CUSTOMER" else "supplier"
                 add(rid, sr, code, "supplier_code", row["supplier_code"], m[0],
-                    f"'{row['supplier']}' looks like supplier {m[0]} "
+                    f"'{row['supplier']}' looks like {kind} {m[0]} "
                     f"({m[2]:.0%} name match).")
 
         elif code == "UNKNOWN_ACCOUNT" and accounts:
@@ -136,15 +147,16 @@ def propose_fixes(rows: pd.DataFrame, issues: pd.DataFrame,
                         "or wrong year.")
 
     # blanks (no issue row, but the batch can't post without codes)
-    if suppliers:
-        for rid, row in by_rid.items():
-            if str(row.get("supplier_code", "")).strip() == "":
-                m = _best_match(normalize_supplier(row["supplier"]), suppliers)
-                if m:
-                    add(rid, int(row["source_row"]), "BLANK_SUPPLIER",
-                        "supplier_code", "", m[0],
-                        f"'{row['supplier']}' matches supplier {m[0]} "
-                        f"({m[2]:.0%}).")
+    for rid, row in by_rid.items():
+        if str(row.get("supplier_code", "")).strip() == "":
+            master = party_master_for(row)
+            if not master:
+                continue
+            m = _best_match(normalize_supplier(row["supplier"]), master)
+            if m:
+                add(rid, int(row["source_row"]), "BLANK_PARTY",
+                    "supplier_code", "", m[0],
+                    f"'{row['supplier']}' matches {m[0]} ({m[2]:.0%}).")
 
     return pd.DataFrame(fixes)
 

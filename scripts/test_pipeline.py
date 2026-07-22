@@ -130,4 +130,74 @@ print(f"[rules] majority coding after odd correction: {rule['account_code']} "
 assert rule["account_code"] == "610-000", "majority vote failed"
 assert rule["consistency"] < 1.0
 
+# 9. MULTI-MODULE: sales + receipts workbook -> correct doc types end-to-end
+SALES = ROOT / "inbox" / "june_sales_MAJU_JAYA.xlsx"
+sdf, snotes = parse_workbook(SALES)
+sdf = ensure_row_ids(sdf)
+print(f"[multi] parsed sales file: {len(sdf)} rows; hints: "
+      f"{sdf.groupby('source_sheet')['doc_type_hint'].first().to_dict()}")
+assert set(sdf[sdf["source_sheet"] == "SALES JUN"]["doc_type_hint"]) == {"sale"}
+assert set(sdf[sdf["source_sheet"] == "RESIT"]["doc_type_hint"]) == {"customer_payment"}
+
+scoded = classify(sdf, ctx, RuleStore(DATA))   # offline: doc_type <- hint
+assert list(scoded["doc_type"]) == list(scoded["doc_type_hint"])
+print("[multi] fallback classify keeps hinted doc types  OK")
+
+# bookkeeper codes parties (customers!) + accounts (income / bank)
+sales_coding = {
+    "Delima Construction": ("400-D001",),
+    "En. Rahman": ("400-E002",),
+    "Fong Brothers": ("400-F003",),
+    "Gemilang Cafe": ("400-G004",),
+}
+for i, row in scoded.iterrows():
+    scoded.loc[i, "supplier_code"] = sales_coding[row["supplier"]][0]
+    if row["doc_type"] == "sale":
+        scoded.loc[i, "account_code"] = "500-000"     # income account
+    else:
+        scoded.loc[i, "account_code"] = "310-001"     # bank account
+    scoded.loc[i, "tax_code"] = "NR"
+
+issues_s = validate_batch(scoded, ctx, registry.keys)
+counts_s = summarize(issues_s)
+assert counts_s["error"] == 0, issues_s[issues_s.severity == "error"]
+print(f"[multi] clean sales batch validates: {counts_s}")
+
+# wrong-master and wrong-account-kind must be caught
+bad_s = scoded.copy()
+bad_s.loc[0, "supplier_code"] = "300-A001"    # supplier code on a SALE
+bad_s.loc[1, "account_code"] = "902-000"      # expense account on a SALE
+issues_bad_s = validate_batch(bad_s, ctx, registry.keys)
+codes_s = set(issues_bad_s["code"])
+assert "UNKNOWN_CUSTOMER" in codes_s, codes_s
+assert "ACCOUNT_TYPE_MISMATCH" in codes_s, codes_s
+print("[multi] wrong master + wrong account kind caught  OK")
+
+# doc_type missing must block
+no_type = scoded.copy()
+no_type.loc[0, "doc_type"] = ""
+assert "DOC_TYPE_MISSING" in set(validate_batch(no_type, ctx, registry.keys)["code"])
+print("[multi] missing doc_type blocked  OK")
+
+# posting groups into the right SQL modules
+result_s = post_batch(scoded, SQLConfig(dry_run=True), out_dir=ROOT / "posted",
+                      registry=registry)
+import json as _json
+payload = _json.loads(Path(result_s["payload"]).read_text(encoding="utf-8"))
+sql_docs = {inv["sql_doc"] for inv in payload["invoices"]}
+assert sql_docs == {"SL_IV", "AR_PM"}, sql_docs
+print(f"[multi] dry-run payload routes to modules: {sorted(sql_docs)}  OK")
+
+# doc_type-scoped rules: same party name learns separately per doc type
+store_s = RuleStore(DATA)
+for _, r in scoded.iterrows():
+    store_s.learn(r["supplier"], r["supplier_code"], r["account_code"],
+                  r["tax_code"], r["doc_type"])
+store_s.save()
+rule_sale = store_s.lookup("Delima Construction", "sale")
+rule_pay = store_s.lookup("Delima Construction", "customer_payment")
+assert rule_sale["account_code"] == "500-000"
+assert rule_pay["account_code"] == "310-001"
+print("[multi] doc_type-scoped rules learned (sale->500-000, payment->310-001)")
+
 print("\nALL PIPELINE TESTS PASSED")

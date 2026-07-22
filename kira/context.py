@@ -3,8 +3,11 @@
 Phase-0 loads these from CSV exports placed in the client's data_dir.
 Export them from SQL Accounting (or via Firebird ODBC) with columns:
 
-  chart_of_accounts.csv : code, description, type   (type e.g. EXPENSE, COST OF SALES)
-  suppliers.csv         : code, name
+  chart_of_accounts.csv : code, description, type   (EXPENSE, COST OF SALES,
+                          SALES/INCOME, BANK, CASH, ...)
+  suppliers.csv         : code, name                (creditors)
+  customers.csv         : code, name                (debtors — for sales &
+                          customer payments; optional for purchase-only books)
   tax_codes.csv         : code, description, rate
 """
 
@@ -22,25 +25,36 @@ class ClientContext:
     name: str
     accounts: pd.DataFrame = field(default_factory=pd.DataFrame)
     suppliers: pd.DataFrame = field(default_factory=pd.DataFrame)
+    customers: pd.DataFrame = field(default_factory=pd.DataFrame)
     tax_codes: pd.DataFrame = field(default_factory=pd.DataFrame)
 
-    def expense_accounts(self) -> pd.DataFrame:
+    def _accounts_of(self, pattern: str) -> pd.DataFrame:
         if self.accounts.empty or "type" not in self.accounts.columns:
             return self.accounts
-        mask = self.accounts["type"].str.upper().str.contains(
-            "EXPENSE|COST|PURCHASE", na=False
-        )
+        mask = self.accounts["type"].str.upper().str.contains(pattern, na=False)
         picked = self.accounts[mask]
         return picked if not picked.empty else self.accounts
+
+    def expense_accounts(self) -> pd.DataFrame:
+        return self._accounts_of("EXPENSE|COST|PURCHASE")
+
+    def income_accounts(self) -> pd.DataFrame:
+        return self._accounts_of("SALES|INCOME|REVENUE")
+
+    def money_accounts(self) -> pd.DataFrame:
+        return self._accounts_of("BANK|CASH")
 
     def as_prompt_block(self) -> str:
         """Render master data compactly for the classification prompt."""
         buf = io.StringIO()
         buf.write("## Chart of accounts (code | description | type)\n")
-        for _, r in self.expense_accounts().iterrows():
+        for _, r in self.accounts.iterrows():
             buf.write(f"{r['code']} | {r['description']} | {r.get('type', '')}\n")
-        buf.write("\n## Suppliers (code | name)\n")
+        buf.write("\n## Suppliers / creditors (code | name)\n")
         for _, r in self.suppliers.iterrows():
+            buf.write(f"{r['code']} | {r['name']}\n")
+        buf.write("\n## Customers / debtors (code | name)\n")
+        for _, r in self.customers.iterrows():
             buf.write(f"{r['code']} | {r['name']}\n")
         buf.write("\n## Tax codes (code | description | rate)\n")
         for _, r in self.tax_codes.iterrows():
@@ -65,5 +79,6 @@ def load_client_context(name: str, data_dir: str | Path) -> ClientContext:
         name=name,
         accounts=_read_csv(d / "chart_of_accounts.csv", ["code", "description"]),
         suppliers=_read_csv(d / "suppliers.csv", ["code", "name"]),
+        customers=_read_csv(d / "customers.csv", ["code", "name"]),
         tax_codes=_read_csv(d / "tax_codes.csv", ["code", "description"]),
     )

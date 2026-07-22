@@ -27,9 +27,12 @@ import pandas as pd
 # Canonical field -> regex alternatives seen in real bookkeeper files
 COLUMN_PATTERNS: dict[str, list[str]] = {
     "date": [r"date", r"tarikh", r"trx\s*date", r"doc\s*date", r"日期"],
+    # canonical "supplier" column = the PARTY on the line (supplier OR customer)
     "supplier": [
         r"supplier", r"vendor", r"creditor", r"pembekal", r"payee",
         r"beneficiary", r"company", r"name", r"供应商", r"kedai", r"shop",
+        r"customer", r"debtor", r"pelanggan", r"client", r"客户",
+        r"received\s*from", r"paid\s*to", r"daripada", r"kepada",
     ],
     "description": [
         r"desc", r"particular", r"detail", r"item", r"remark", r"perkara",
@@ -46,6 +49,39 @@ COLUMN_PATTERNS: dict[str, list[str]] = {
         r"receipt", r"resit", r"单号",
     ],
 }
+
+# Document-type hints, strongest signal first (sheet name / title rows).
+# The AI refines per line; the human confirms in review. "" = let AI decide.
+DOC_TYPE_KEYWORDS: list[tuple[str, str]] = [
+    ("sale", r"sales|jualan|invoice.?s? issued|sales invoice|销售"),
+    ("customer_payment", r"official receipt|receipt.?s? issued|collection|"
+                         r"resit rasmi|payment received|terima|收款"),
+    ("supplier_payment", r"payment voucher|baucar|bayaran keluar|payment out|"
+                         r"paid to|付款"),
+    ("purchase", r"purchase|belian|pembelian|expense|perbelanjaan|petty cash|"
+                 r"supplier|bill|采购"),
+]
+
+_CUSTOMER_HEADER_RE = re.compile(r"customer|debtor|pelanggan|client|客户",
+                                 re.IGNORECASE)
+_SUPPLIER_HEADER_RE = re.compile(
+    r"supplier|vendor|creditor|pembekal|kedai|shop|供应商", re.IGNORECASE)
+
+
+def detect_doc_type(sheet_name: str, title_texts: list[str],
+                    header_texts: list[str]) -> str:
+    """Best-effort document-type hint for a sheet. '' = unknown (AI decides)."""
+    strong = f"{sheet_name} " + " ".join(title_texts)
+    for doc_type, pattern in DOC_TYPE_KEYWORDS:
+        if re.search(pattern, strong, re.IGNORECASE):
+            return doc_type
+    headers = " ".join(str(h) for h in header_texts)
+    if _CUSTOMER_HEADER_RE.search(headers):
+        return "sale"
+    if _SUPPLIER_HEADER_RE.search(headers):
+        return "purchase"
+    return ""
+
 
 _AMOUNT_RE = re.compile(r"^-?\s*(rm)?\s*[\d,]+(\.\d{1,2})?\s*$", re.IGNORECASE)
 _JUNK_ROW_RE = re.compile(
@@ -246,6 +282,13 @@ def parse_purchase_listing(path: str | Path, sheet: int | str = 0) -> pd.DataFra
     df["date"] = df["date"].ffill()
     # Merged-cell books: supplier written once for a run of lines below it
     df["supplier"] = df["supplier"].replace("", pd.NA).ffill().fillna("")
+    # Document-type hint from the sheet's own words (AI refines per line)
+    sheet_label = str(sheet) if not isinstance(sheet, int) else Path(path).stem
+    titles = [" ".join(_clean_str(v) for v in raw.iloc[i] if _clean_str(v))
+              for i in range(min(max(header_row, 0), 5))]
+    header_texts = ([_clean_str(h) for h in raw.iloc[header_row]]
+                    if 0 <= header_row < len(raw) else [])
+    df["doc_type_hint"] = detect_doc_type(sheet_label, titles, header_texts)
     # Conversion-integrity data for reconciliation (read via df.attrs)
     df.attrs["declared_totals"] = declared_totals
     df.attrs["parsed_total"] = round(float(df["amount"].sum()), 2)

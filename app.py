@@ -80,8 +80,10 @@ batch_store = BatchStore() if not REMOTE else None
 
 EXCEL_EXT = {".xlsx", ".xls", ".csv"}
 DOC_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
-EDITABLE = ["date", "supplier", "description", "amount", "tax", "doc_no",
-            "supplier_code", "account_code", "tax_code"]
+EDITABLE = ["doc_type", "date", "supplier", "description", "amount", "tax",
+            "doc_no", "supplier_code", "account_code", "tax_code"]
+DOC_TYPE_OPTIONS = ["purchase", "purchase_return", "sale", "sales_return",
+                    "customer_payment", "supplier_payment", "journal"]
 
 # ---------- sidebar ----------
 ui.sidebar_brand()
@@ -157,6 +159,13 @@ def review_editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
     return st.data_editor(
         display[cols],
         disabled=["status", "source", "reason", "confidence"],
+        column_config={
+            "doc_type": st.column_config.SelectboxColumn(
+                "doc_type", options=DOC_TYPE_OPTIONS, required=True,
+                help="Which SQL module this line posts into"),
+            "supplier": st.column_config.TextColumn("party"),
+            "supplier_code": st.column_config.TextColumn("party_code"),
+        },
         use_container_width=True, num_rows="fixed", key=key,
     )
 
@@ -258,7 +267,8 @@ with tab_batch:
             if doc_files:
                 if ai_on:
                     docs = extract_documents(doc_files, model=LLM["model"],
-                                             max_tokens=LLM["max_tokens"])
+                                             max_tokens=LLM["max_tokens"],
+                                             client_name=client_name)
                     frames.append(docs)
                     notes.append(f"{len(doc_files)} document file(s) → "
                                  f"{len(docs)} entries")
@@ -339,7 +349,8 @@ with tab_batch:
                 else:
                     for _, r in approved.iterrows():
                         store.learn(r["supplier"], r["supplier_code"],
-                                    r["account_code"], r["tax_code"])
+                                    r["account_code"], r["tax_code"],
+                                    str(r.get("doc_type", "") or "purchase"))
                     store.save()
                     result = post_batch(approved, SQL, registry=registry)
                     audit.log_batch(", ".join(src), result, len(approved),

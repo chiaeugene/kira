@@ -32,16 +32,18 @@ from kira.poster import PostedRegistry, SQLConfig, post_batch
 from kira.registry import client_dir, open_client
 from kira.validate import summarize, validate_batch
 
-REVIEW_COLS = ["date", "supplier", "description", "amount", "tax", "doc_no",
-               "supplier_code", "account_code", "tax_code", "confidence",
-               "source", "reason", "source_row"]
+REVIEW_COLS = ["row_id", "doc_type", "date", "supplier", "description",
+               "amount", "tax", "doc_no", "supplier_code", "account_code",
+               "tax_code", "contra_account", "confidence", "source", "reason",
+               "doc_type_hint", "source_row"]
 
 
 def load_cfg() -> dict:
     return yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
 
 
-def ingest_files(paths: list[Path], llm_cfg: dict) -> tuple[pd.DataFrame, list[str]]:
+def ingest_files(paths: list[Path], llm_cfg: dict,
+                 client_name: str = "the business") -> tuple[pd.DataFrame, list[str]]:
     frames, notes = [], []
     docs: list[tuple[str, bytes]] = []
     for p in paths:
@@ -59,7 +61,8 @@ def ingest_files(paths: list[Path], llm_cfg: dict) -> tuple[pd.DataFrame, list[s
         if not llm_available():
             raise SystemExit("PDF/image files need ANTHROPIC_API_KEY set.")
         extracted = extract_documents(docs, model=llm_cfg["model"],
-                                      max_tokens=llm_cfg["max_tokens"])
+                                      max_tokens=llm_cfg["max_tokens"],
+                                      client_name=client_name)
         frames.append(extracted)
         notes.append(f"{len(docs)} document file(s) -> {len(extracted)} entries")
     if not frames:
@@ -94,7 +97,7 @@ def main() -> int:
         if not args.files:
             ap.error("give input files or --from-review")
         paths = [Path(f) for f in args.files]
-        raw, notes = ingest_files(paths, cfg["llm"])
+        raw, notes = ingest_files(paths, cfg["llm"], client_name=args.client)
         print("\n".join(f"  {n}" for n in notes))
         coded = classify(raw, ctx, store, model=cfg["llm"]["model"],
                          batch_size=cfg["llm"]["batch_size"],
@@ -127,7 +130,8 @@ def main() -> int:
 
     # fully clean -> learn + post
     for _, r in coded.iterrows():
-        store.learn(r["supplier"], r["supplier_code"], r["account_code"], r["tax_code"])
+        store.learn(r["supplier"], r["supplier_code"], r["account_code"],
+                    r["tax_code"], str(r.get("doc_type", "") or "purchase"))
     store.save()
     result = post_batch(coded, sql, registry=registry)
     audit.log_batch(", ".join(args.files or [args.from_review]), result,
