@@ -33,9 +33,18 @@ def source_channel(batch: dict) -> str:
         return "whatsapp"
     return "upload"
 
-ROW_COLS = ["date", "supplier", "description", "amount", "tax", "doc_no",
-            "supplier_code", "account_code", "tax_code", "confidence",
-            "source", "reason", "source_row"]
+ROW_COLS = ["row_id", "date", "supplier", "description", "amount", "tax",
+            "doc_no", "supplier_code", "account_code", "tax_code",
+            "confidence", "source", "reason", "source_row"]
+
+
+def ensure_row_ids(df: pd.DataFrame) -> pd.DataFrame:
+    """Give every line a batch-unique row_id. source_row is only the display
+    reference back to the original file — it repeats across sheets/files, so
+    anything that must target ONE line (repairs, corrections) uses row_id."""
+    out = df.reset_index(drop=True).copy()
+    out["row_id"] = range(len(out))
+    return out
 
 
 def rows_to_records(df: pd.DataFrame) -> list[dict]:
@@ -51,6 +60,8 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
     df["amount"] = df["amount"].astype(float)
     df["tax"] = df["tax"].astype(float)
     df["source_row"] = df["source_row"].astype(int)
+    if "row_id" in df.columns:
+        df["row_id"] = df["row_id"].astype(int)
     for c in ("supplier_code", "account_code", "tax_code", "doc_no"):
         df[c] = df[c].fillna("").astype(str)
     return df

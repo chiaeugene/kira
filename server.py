@@ -35,13 +35,15 @@ import pandas as pd
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 
-from kira.batches import BatchStore, records_to_df, source_channel
+from kira.batches import (BatchStore, ensure_row_ids, records_to_df,
+                          source_channel)
 from kira.classify import classify
 from kira.documents import MEDIA_TYPES, extract_documents, llm_available
 from kira.filelog import FileLog
 from kira.ingest import parse_workbook
 from kira.poster import PostedRegistry, _rows_to_invoices
 from kira.registry import client_dir, firm_overview, list_clients, open_client
+from kira.repairs import propose_fixes
 from kira.review import approve_batch, reject_batch
 from kira.validate import validate_batch
 
@@ -141,7 +143,7 @@ def _code_and_batch(client: str, raw: pd.DataFrame, notes: list[str],
                     source_files: list[str]) -> dict:
     ctx, rules, _audit = open_client(client)
     registry = PostedRegistry(client_dir(client))
-    coded = classify(raw, ctx, rules, model=LLM["model"],
+    coded = classify(ensure_row_ids(raw), ctx, rules, model=LLM["model"],
                      batch_size=LLM["batch_size"], max_tokens=LLM["max_tokens"])
     issues = validate_batch(coded, ctx, registry.keys)
     return store.create(client, source_files, coded, issues, notes)
@@ -214,6 +216,18 @@ def approve(bid: str, body: dict):
     if not ok:
         raise HTTPException(409, detail=info)
     return _summary(info["batch"])
+
+
+@app.get("/api/batches/{bid}/repairs", dependencies=[Depends(firm_auth)])
+def batch_repairs(bid: str):
+    """Suggested fixes for the batch's validation issues."""
+    b = store.get(bid)
+    if b is None:
+        raise HTTPException(404, "no such batch")
+    ctx, _rules, _audit = open_client(b["client"])
+    fixes = propose_fixes(records_to_df(b["rows"]),
+                          pd.DataFrame(b["issues"]), ctx)
+    return _json_records(fixes)
 
 
 @app.post("/api/batches/{bid}/reject", dependencies=[Depends(firm_auth)])

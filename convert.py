@@ -64,7 +64,8 @@ def ingest_files(paths: list[Path], llm_cfg: dict) -> tuple[pd.DataFrame, list[s
         notes.append(f"{len(docs)} document file(s) -> {len(extracted)} entries")
     if not frames:
         raise SystemExit("Nothing parseable given.")
-    return pd.concat(frames, ignore_index=True), notes
+    from kira.batches import ensure_row_ids
+    return ensure_row_ids(pd.concat(frames, ignore_index=True)), notes
 
 
 def main() -> int:

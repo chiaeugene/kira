@@ -34,8 +34,9 @@ SEV_ERROR, SEV_WARN, SEV_INFO = "error", "warning", "info"
 class Issue:
     severity: str
     code: str
-    source_row: int
+    source_row: int   # where it sits in the original file (display)
     message: str
+    row_id: int = -1  # batch-unique line id (targeting); -1 if unavailable
 
 
 def dup_key(supplier_code: str, doc_no: str, amount: float) -> str:
@@ -60,6 +61,9 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
             except (TypeError, ValueError):
                 pass
 
+    def rid(row) -> int:
+        return int(row["row_id"]) if "row_id" in row and pd.notna(row.get("row_id")) else -1
+
     # --- duplicates inside the batch ---
     seen: dict[str, int] = {}
     for _, row in df.iterrows():
@@ -69,72 +73,71 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
             if k in seen:
                 issues.append(Issue(
                     SEV_ERROR, "DUP_IN_BATCH", int(row["source_row"]),
-                    f"Looks identical to row {seen[k]} (same supplier/doc/amount)."))
+                    f"Looks identical to row {seen[k]} (same supplier/doc/amount).",
+                    rid(row)))
                 break
         seen.setdefault(key, int(row["source_row"]))
         seen.setdefault(alt, int(row["source_row"]))
 
     for _, row in df.iterrows():
         sr = int(row["source_row"])
+        rid_ = rid(row)
         amount = float(row["amount"])
         tax = float(row.get("tax", 0) or 0)
         s_code = str(row.get("supplier_code", "")).strip()
         a_code = str(row.get("account_code", "")).strip()
         t_code = str(row.get("tax_code", "")).strip()
 
+        def add(sev: str, code: str, msg: str) -> None:
+            issues.append(Issue(sev, code, sr, msg, rid_))
+
         # --- against posted history ---
         if dup_key(s_code, row.get("doc_no", ""), amount) in posted_keys:
-            issues.append(Issue(SEV_ERROR, "DUP_POSTED", sr,
-                                "Already posted previously for this client."))
+            add(SEV_ERROR, "DUP_POSTED", "Already posted previously for this client.")
 
         # --- master data checks ---
         if s_code and supplier_codes and s_code not in supplier_codes:
-            issues.append(Issue(SEV_ERROR, "UNKNOWN_SUPPLIER", sr,
-                                f"Supplier code '{s_code}' is not in the master."))
+            add(SEV_ERROR, "UNKNOWN_SUPPLIER",
+                f"Supplier code '{s_code}' is not in the master.")
         if a_code and account_codes and a_code not in account_codes:
-            issues.append(Issue(SEV_ERROR, "UNKNOWN_ACCOUNT", sr,
-                                f"Account code '{a_code}' is not in the chart of accounts."))
+            add(SEV_ERROR, "UNKNOWN_ACCOUNT",
+                f"Account code '{a_code}' is not in the chart of accounts.")
         if t_code and tax_codes and t_code not in tax_codes:
-            issues.append(Issue(SEV_WARN, "UNKNOWN_TAX", sr,
-                                f"Tax code '{t_code}' is not in the tax code list."))
+            add(SEV_WARN, "UNKNOWN_TAX",
+                f"Tax code '{t_code}' is not in the tax code list.")
 
         # --- amount / tax sanity ---
         if amount < 0:
-            issues.append(Issue(SEV_WARN, "NEGATIVE_AMOUNT", sr,
-                                "Negative amount — is this a credit note?"))
+            add(SEV_WARN, "NEGATIVE_AMOUNT", "Negative amount — is this a credit note?")
         if tax and abs(tax) >= abs(amount):
-            issues.append(Issue(SEV_ERROR, "TAX_EXCEEDS_AMOUNT", sr,
-                                f"Tax {tax:.2f} >= amount {amount:.2f}."))
+            add(SEV_ERROR, "TAX_EXCEEDS_AMOUNT",
+                f"Tax {tax:.2f} >= amount {amount:.2f}.")
         elif tax and t_code in tax_rates and tax_rates[t_code] > 0:
             rate = tax_rates[t_code]
             exp_exclusive = amount * rate / 100.0
             exp_inclusive = amount * rate / (100.0 + rate)
             if min(abs(tax - exp_exclusive), abs(tax - exp_inclusive)) > max(1.0, 0.05 * abs(amount)):
-                issues.append(Issue(
-                    SEV_WARN, "TAX_RATE_MISMATCH", sr,
+                add(SEV_WARN, "TAX_RATE_MISMATCH",
                     f"Tax {tax:.2f} doesn't match {t_code} @ {rate:.0f}% "
-                    f"(expected ≈{exp_exclusive:.2f})."))
+                    f"(expected ≈{exp_exclusive:.2f}).")
         elif tax and t_code in tax_rates and tax_rates[t_code] == 0:
-            issues.append(Issue(SEV_WARN, "TAX_RATE_MISMATCH", sr,
-                                f"Tax {tax:.2f} recorded but {t_code} is a 0% code."))
+            add(SEV_WARN, "TAX_RATE_MISMATCH",
+                f"Tax {tax:.2f} recorded but {t_code} is a 0% code.")
 
         # --- date sanity ---
         d = row.get("date")
         if isinstance(d, dt.date):
             if d > today + dt.timedelta(days=7):
-                issues.append(Issue(SEV_ERROR, "DATE_FUTURE", sr,
-                                    f"Date {d} is in the future."))
+                add(SEV_ERROR, "DATE_FUTURE", f"Date {d} is in the future.")
             elif d < today - dt.timedelta(days=548):
-                issues.append(Issue(SEV_WARN, "DATE_STALE", sr,
-                                    f"Date {d} is over 18 months old."))
+                add(SEV_WARN, "DATE_STALE", f"Date {d} is over 18 months old.")
 
         # --- completeness ---
         if not str(row.get("doc_no", "")).strip():
-            issues.append(Issue(SEV_INFO, "MISSING_DOC_NO", sr,
-                                "No document number — SQL will auto-number."))
+            add(SEV_INFO, "MISSING_DOC_NO", "No document number — SQL will auto-number.")
 
     return pd.DataFrame([i.__dict__ for i in issues],
-                        columns=["severity", "code", "source_row", "message"])
+                        columns=["severity", "code", "source_row", "message", "row_id"])
 
 
 def summarize(issues: pd.DataFrame) -> dict:

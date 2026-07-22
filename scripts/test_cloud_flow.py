@@ -29,6 +29,13 @@ for f in ("rules.json", "posted_registry.json", "audit.jsonl", "file_log.json"):
 if (ROOT / "batches").exists():
     shutil.rmtree(ROOT / "batches")
 
+import os
+# pin test tokens BEFORE agent import — its load_env() would otherwise pull
+# the production .env (setdefault semantics: pre-set env always wins)
+os.environ["KIRA_AGENT_TOKEN"] = "dev-agent-token-change-me"
+os.environ["KIRA_SERVER_URL"] = "http://testserver"
+os.environ["KIRA_FIRM_TOKEN"] = "dev-firm-token-change-me"
+
 import server  # noqa: E402
 import agent as agent_mod  # noqa: E402
 
@@ -143,6 +150,26 @@ r = api.post("/api/intake/telegram?chat_id=999",
              files={"file": ("x.xlsx", b"zz", "application/octet-stream")})
 assert r.status_code == 404
 print("[telegram] unmapped chat_id -> 404  OK")
+
+# 7b. repairs endpoint proposes dropping the duplicate lines
+r = api.get(f"/api/batches/{dup['batch_id']}/repairs", headers=FIRM)
+assert r.status_code == 200
+repair_rows = r.json()
+assert any(f["field"] == "__drop__" for f in repair_rows), repair_rows[:2]
+print(f"[repairs] endpoint proposes {len(repair_rows)} fix(es) "
+      "incl. duplicate removal")
+
+# 7c. agent setup scanner finds DCF + FDB files in an eStream-style tree
+import tempfile as _tf
+from agent import scan_sql_companies
+fake = Path(_tf.mkdtemp()) / "eStream" / "SQLAccounting"
+(fake / "Share").mkdir(parents=True)
+(fake / "DB").mkdir()
+(fake / "Share" / "Default.DCF").write_text("x")
+(fake / "DB" / "ACC-0001.FDB").write_text("x")
+dcfs, fdbs = scan_sql_companies([str(fake.parent)])
+assert len(dcfs) == 1 and len(fdbs) == 1
+print(f"[wizard] scanner found {dcfs[0].name} + {fdbs[0].name}")
 
 # 8. reject flow (the Telegram batch)
 r = api.post(f"/api/batches/{tg_bid}/reject", headers=FIRM,

@@ -63,6 +63,9 @@ class KiraAPI:
     def batch(self, bid: str) -> dict:
         return self._get(f"/api/batches/{bid}")
 
+    def repairs(self, bid: str) -> list[dict]:
+        return self._get(f"/api/batches/{bid}/repairs")
+
     def approve(self, bid: str, rows: list[dict]) -> dict:
         return self._post(f"/api/batches/{bid}/approve", {"rows": rows})
 

@@ -28,14 +28,15 @@ from kira.envfile import load_env
 load_env()  # .env present -> cloud mode; absent -> local mode
 
 from kira.api_client import KiraAPI, remote_url
-from kira.batches import (BatchStore, records_to_df, rows_to_records,
-                          source_channel)
+from kira.batches import (BatchStore, ensure_row_ids, records_to_df,
+                          rows_to_records, source_channel)
 from kira.classify import classify, _llm_available
 from kira.documents import extract_documents
 from kira.filelog import FileLog
 from kira.ingest import parse_workbook
 from kira.poster import PostedRegistry, SQLConfig, post_batch
 from kira.registry import client_dir, firm_overview, list_clients, open_client
+from kira.repairs import apply_fixes, propose_fixes
 from kira.review import approve_batch, reject_batch
 from kira.validate import summarize, validate_batch
 
@@ -146,6 +147,21 @@ def note_widget(n: str):
     (st.warning if "DUPLICATE" in n or "⚠" in n else st.caption)(n)
 
 
+def show_repairs(fixes: pd.DataFrame, key: str) -> bool:
+    """Render the suggested-repairs panel. Returns True if user clicked apply."""
+    if fixes.empty:
+        return False
+    with st.expander(f"Suggested repairs — Kira can fix "
+                     f"{len(fixes)} issue(s) for you", expanded=True):
+        st.dataframe(fixes.drop(columns=["row_id"], errors="ignore"),
+                     use_container_width=True, hide_index=True)
+        st.caption("Applying updates the lines below (duplicates are removed). "
+                   "You still review and approve — and everything is "
+                   "re-checked at approval.")
+        return st.button("Apply suggested repairs", key=key)
+    return False
+
+
 # =============================== CONVERT ===============================
 with tab_batch:
     show_hero = "coded" not in st.session_state and "upload_result" not in st.session_state
@@ -227,7 +243,7 @@ with tab_batch:
                                "AI extraction needs ANTHROPIC_API_KEY.")
 
         if frames:
-            parsed = pd.concat(frames, ignore_index=True)
+            parsed = ensure_row_ids(pd.concat(frames, ignore_index=True))
             with st.spinner("Coding lines against this client's ledger…"):
                 st.session_state.coded = classify(
                     parsed, ctx, store, model=LLM["model"],
@@ -259,6 +275,10 @@ with tab_batch:
                   delta=f"{counts['warning']} warnings", delta_color="off")
 
         show_issues(issues, counts)
+        fixes = propose_fixes(df, issues, ctx)
+        if show_repairs(fixes, key="repairs_convert"):
+            st.session_state.coded = apply_fixes(df, fixes)
+            st.rerun()
         edited = review_editor(df, key="editor_convert")
 
         left, right = st.columns([1, 3])
@@ -340,13 +360,25 @@ with tab_inbox:
         for n in b.get("notes", []):
             note_widget(n)
 
-        rows_df = records_to_df(b["rows"])
+        rows_key = f"rows_{bid}"
+        rows_df = st.session_state.get(rows_key)
+        if rows_df is None:
+            rows_df = records_to_df(b["rows"])
         issues = pd.DataFrame(b["issues"])
         counts = ({"error": int((issues["severity"] == "error").sum()),
                    "warning": int((issues["severity"] == "warning").sum()),
                    "info": int((issues["severity"] == "info").sum())}
                   if not issues.empty else {"error": 0, "warning": 0, "info": 0})
         show_issues(issues, counts)
+
+        if REMOTE:
+            fixes = pd.DataFrame(api.repairs(bid))
+        else:
+            bctx, _br, _ba = open_client(b["client"])
+            fixes = propose_fixes(rows_df, issues, bctx)
+        if show_repairs(fixes, key=f"repairs_{bid}"):
+            st.session_state[rows_key] = apply_fixes(rows_df, fixes)
+            st.rerun()
 
         edited = review_editor(rows_df, key=f"editor_{bid}")
 

@@ -28,7 +28,9 @@ store = RuleStore(DATA)
 registry = PostedRegistry(DATA)
 
 # 1. Parse the whole messy workbook (3 sheets: JUN, PETTY CASH, NOTES)
+from kira.batches import ensure_row_ids
 df, notes = parse_workbook(SAMPLE)
+df = ensure_row_ids(df)
 print(f"[parse] {len(df)} rows from sheets: {notes}")
 assert len(df) == 11, f"expected 11 rows (9 JUN + 2 petty cash), got {len(df)}"
 assert any("NOTES" in n and "skipped" in n for n in notes), "NOTES sheet should be skipped"
@@ -74,6 +76,29 @@ codes_found = set(issues_bad["code"])
 print(f"[validate] dirty batch issues: {sorted(codes_found)}")
 for expected in ("UNKNOWN_ACCOUNT", "TAX_EXCEEDS_AMOUNT", "DATE_FUTURE", "DUP_IN_BATCH"):
     assert expected in codes_found, f"missing check: {expected}"
+
+# 4c. Suggested repairs: Kira proposes concrete fixes for the dirty batch
+# (re-id after the concat above — real ingestion always ids after combining)
+from kira.repairs import apply_fixes, propose_fixes
+bad2 = ensure_row_ids(bad.copy())
+bad2.loc[0, "supplier_code"] = "300-ZZZZ"   # unknown supplier w/ fuzzy match
+issues_bad2 = validate_batch(bad2, ctx, registry.keys)
+fixes = propose_fixes(bad2, issues_bad2, ctx)
+fixed_fields = set(fixes["field"])
+print(f"[repairs] {len(fixes)} proposals covering fields: {sorted(fixed_fields)}")
+assert "__drop__" in fixed_fields          # duplicate line removal
+assert "tax" in fixed_fields               # impossible tax cleared
+assert "date" in fixed_fields              # future date corrected
+sup_fix = fixes[(fixes["field"] == "supplier_code")
+                & (fixes["row_id"] == int(bad2.loc[0, "row_id"]))]
+assert not sup_fix.empty and sup_fix.iloc[0]["proposed"] == "300-A001", sup_fix
+repaired = apply_fixes(bad2, fixes)
+issues_after = validate_batch(repaired, ctx, registry.keys)
+after = summarize(issues_after)
+before = summarize(issues_bad2)
+print(f"[repairs] errors before={before['error']} after={after['error']}")
+assert after["error"] < before["error"]
+assert len(repaired) == len(bad2) - 1      # duplicate dropped
 
 # 5. Learn + post (dry run, recorded in registry)
 for _, r in coded.iterrows():

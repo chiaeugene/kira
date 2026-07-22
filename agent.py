@@ -117,19 +117,125 @@ def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
     return "posted" if ok else "failed"
 
 
+# --------------------------- setup wizard ---------------------------
+
+SCAN_ROOTS = [r"C:\eStream", r"D:\eStream", r"C:\SQLAccounting",
+              r"C:\estream", r"C:\Program Files (x86)\eStream"]
+
+
+def scan_sql_companies(roots: list[str] | None = None
+                       ) -> tuple[list[Path], list[Path]]:
+    """Find SQL Accounting DCF files and company .FDB databases on this PC."""
+    dcfs: list[Path] = []
+    fdbs: list[Path] = []
+    for root in (roots or SCAN_ROOTS):
+        r = Path(root)
+        if not r.exists():
+            continue
+        try:
+            dcfs += list(r.rglob("*.DCF"))
+            fdbs += list(r.rglob("*.FDB"))
+        except (PermissionError, OSError):
+            continue
+    return sorted(set(dcfs)), sorted(set(fdbs))
+
+
+def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
+    """Interactive first-run setup: scan for company files, map them to Kira
+    clients, write agent_config.yaml. Returns True when a config was written."""
+    print()
+    print("KIRA AGENT SETUP")
+    print("-" * 50)
+    server = os.environ.get("KIRA_SERVER_URL", "")
+    token = os.environ.get("KIRA_AGENT_TOKEN", "")
+    if not server:
+        server = input("Kira Cloud URL (e.g. https://kira-cloud.onrender.com): ").strip()
+    else:
+        print(f"Kira Cloud URL:  {server}   (from .env)")
+    if not token:
+        token = input("Agent token (from your Kira administrator): ").strip()
+    else:
+        print("Agent token:     (from .env)")
+    agent_name = input("Name this PC (e.g. office-pc-1): ").strip() or "office-pc-1"
+
+    print("\nScanning this PC for SQL Accounting company files...")
+    dcfs, fdbs = scan_sql_companies()
+    if not dcfs or not fdbs:
+        print("  No SQL Accounting files found in the usual folders.")
+        print("  In SQL Accounting, open File -> Open Company to see the "
+              "DCF path and company file names, then edit agent_config.yaml "
+              "manually (see AGENT_SETUP.md).")
+        return False
+    dcf = dcfs[0]
+    if len(dcfs) > 1:
+        print("\nFound more than one DCF (company directory):")
+        for i, d in enumerate(dcfs, 1):
+            print(f"  {i}. {d}")
+        pick = input(f"Which one? [1-{len(dcfs)}, Enter=1]: ").strip()
+        dcf = dcfs[int(pick) - 1] if pick.isdigit() else dcfs[0]
+
+    print(f"\nCompany databases found (via {dcf.name}):")
+    for i, f in enumerate(fdbs, 1):
+        print(f"  {i}. {f.name}   ({f})")
+
+    clients: dict = {}
+    print("\nNow map each Kira client to its company database.")
+    print("(Client names must match the names in Kira Cloud exactly.)")
+    while True:
+        cname = input("\nKira client name (Enter to finish): ").strip()
+        if not cname:
+            break
+        pick = input(f"  Company database for {cname} [1-{len(fdbs)}]: ").strip()
+        if not (pick.isdigit() and 1 <= int(pick) <= len(fdbs)):
+            print("  Not a valid number — skipped.")
+            continue
+        user = input("  SQL Accounting username [ADMIN]: ").strip() or "ADMIN"
+        password = input("  SQL Accounting password: ").strip()
+        clients[cname] = {
+            "dry_run": True,
+            "user": user, "password": password,
+            "dcf_path": str(dcf), "fdb_name": fdbs[int(pick) - 1].name,
+        }
+        print(f"  Mapped {cname} -> {fdbs[int(pick) - 1].name} "
+              "(dry-run until the go-live test).")
+
+    if not clients:
+        print("No clients mapped — nothing written.")
+        return False
+
+    Path(config_path).write_text(yaml.safe_dump({
+        "agent_name": agent_name, "server_url": server,
+        "agent_token": token, "poll_seconds": 30, "clients": clients,
+    }, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    print(f"\nSaved {config_path}. Every company starts in DRY RUN — follow "
+          "the go-live checklist in AGENT_SETUP.md before switching to live.")
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
+    ap.add_argument("--setup", action="store_true",
+                    help="run the interactive setup wizard")
     ap.add_argument("--config", default="agent_config.yaml")
     args = ap.parse_args()
 
     setup_logging()
+
+    if args.setup or not Path(args.config).exists():
+        if not args.setup:
+            print("No agent_config.yaml found — starting first-time setup.")
+        if not setup_wizard(args.config):
+            if not args.once:
+                input("Press Enter to close...")
+            return 2
+        if args.setup:
+            return 0
+
     try:
         cfg = load_cfg(args.config)
     except FileNotFoundError:
         log.error("agent_config.yaml not found next to the program.")
-        log.error("Copy the template provided at setup, fill in the company "
-                  "file details, then start the Agent again.")
         if not args.once:
             input("Press Enter to close...")
         return 2

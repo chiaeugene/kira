@@ -39,9 +39,12 @@ def approve_batch(store: BatchStore, batch: dict,
 
     # log corrections vs the AI's original coding, then learn everything
     n_corr = 0
-    orig = {int(r["source_row"]): r for r in batch["rows"]}
+    def key(rec) -> int:
+        return int(rec.get("row_id", rec["source_row"]) if isinstance(rec, dict)
+                   else rec.get("row_id", rec["source_row"]))
+    orig = {key(r): r for r in batch["rows"]}
     for _, r in rows.iterrows():
-        o = orig.get(int(r["source_row"]))
+        o = orig.get(key(r))
         if o:
             for f in ("supplier_code", "account_code", "tax_code"):
                 if str(o.get(f, "")) != str(r[f]):
