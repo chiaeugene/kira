@@ -42,8 +42,9 @@ from kira.documents import MEDIA_TYPES, extract_documents, llm_available
 from kira.filelog import FileLog
 from kira.ingest import parse_workbook
 from kira.poster import PostedRegistry, _rows_to_invoices
-from kira.registry import (client_dir, create_client, firm_overview,
-                          list_clients, open_client, save_masters)
+from kira.registry import (client_dir, client_meta, create_client,
+                          delete_client, firm_overview, list_clients,
+                          open_client, register_client, save_masters)
 from kira.repairs import propose_fixes
 from kira.review import approve_batch, reject_batch
 from kira.validate import validate_batch
@@ -332,7 +333,8 @@ def clients_list():
         ctx, rules, _a = open_client(name)
         out.append({"name": name, "suppliers": len(ctx.suppliers),
                     "customers": len(ctx.customers),
-                    "accounts": len(ctx.accounts), "rules": len(rules)})
+                    "accounts": len(ctx.accounts), "rules": len(rules),
+                    "meta": client_meta(name)})
     return out
 
 
@@ -348,6 +350,36 @@ def create_client_endpoint(body: dict):
     except ValueError as e:
         raise HTTPException(422, str(e))
     return {"name": name, "created": True}
+
+
+@app.post("/api/clients/register", dependencies=[Depends(agent_auth)])
+def register_client_endpoint(body: dict):
+    """Agent-driven discovery: the Agent scans SQL Accounting on its PC,
+    the person installing it picks a company, and this call pushes that
+    discovery to Kira Cloud — creating the client if it's new, or confirming
+    a link to one that already exists (never overwrites real master data)."""
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "client name is required")
+    try:
+        created = register_client(
+            name,
+            label=body.get("label", ""),
+            fdb_name=body.get("fdb_name", ""),
+            agent_name=body.get("agent_name", ""),
+        )
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"name": name, "created": created}
+
+
+@app.delete("/api/clients/{client}", dependencies=[Depends(firm_auth)])
+def delete_client_endpoint(client: str):
+    try:
+        delete_client(client)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    return {"name": client, "deleted": True}
 
 
 @app.post("/api/clients/{client}/masters", dependencies=[Depends(firm_auth)])

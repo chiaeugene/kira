@@ -201,9 +201,11 @@ assert rule_pay["account_code"] == "310-001"
 print("[multi] doc_type-scoped rules learned (sale->500-000, payment->310-001)")
 
 # 10. Add-a-new-client registry functions (local mode path)
-from kira.registry import create_client, save_masters
+from kira.registry import (client_meta, create_client, delete_client,
+                           register_client, save_masters)
 import shutil as _shutil
 _shutil.rmtree(ROOT / "client_data" / "TEST_NEW_CO", ignore_errors=True)
+_shutil.rmtree(ROOT / "client_data" / "TEST_REG_CO", ignore_errors=True)
 
 d = create_client("TEST_NEW_CO")
 assert (d / "suppliers.csv").read_text(encoding="utf-8") == "code,name\n"
@@ -232,5 +234,31 @@ assert len(ctx2.suppliers) == 1 and ctx2.suppliers.iloc[0]["code"] == "900-Z"
 print("[registry] save_masters overwrites the right file, blocks path traversal")
 
 _shutil.rmtree(ROOT / "client_data" / "TEST_NEW_CO", ignore_errors=True)
+
+# 11. Agent-driven discovery: register_client is idempotent (create vs link),
+#     never overwrites real masters, and delete_client actually removes it
+created = register_client("TEST_REG_CO", label="Test Reg Sdn Bhd",
+                          fdb_name="ACC-9999.FDB", agent_name="test-pc")
+assert created is True
+meta = client_meta("TEST_REG_CO")
+assert meta["discovered_via"] == "agent" and meta["label"] == "Test Reg Sdn Bhd"
+print("[register] new company creates the client + records discovery meta")
+
+# simulate the console having since added real master data
+save_masters("TEST_REG_CO", {"suppliers.csv": b"code,name\n1,Real Supplier\n"})
+created_again = register_client("TEST_REG_CO", label="ignored this time",
+                                fdb_name="ACC-9999.FDB")
+assert created_again is False, "must link, not recreate"
+ctx3 = load_client_context("TEST_REG_CO", ROOT / "client_data" / "TEST_REG_CO")
+assert len(ctx3.suppliers) == 1, "a repeat register() must NOT wipe real masters"
+print("[register] re-registering an existing client links, doesn't overwrite")
+
+delete_client("TEST_REG_CO")
+assert not (ROOT / "client_data" / "TEST_REG_CO").exists()
+try:
+    delete_client("TEST_REG_CO")
+    raise AssertionError("expected FileNotFoundError")
+except FileNotFoundError:
+    print("[delete] removes the client; deleting again raises cleanly")
 
 print("\nALL PIPELINE TESTS PASSED")

@@ -176,6 +176,34 @@ with st.sidebar.expander("+ Add a new client"):
             except (ValueError, FileExistsError) as e:
                 st.error(str(e))
 
+with st.sidebar.expander("Remove a client"):
+    st.caption("Irreversible — deletes this client's master data, learned "
+              "rules, and audit trail.")
+    rm_name = st.selectbox("Client to remove", clients, key="rm_client_name")
+    rm_confirm = st.text_input(f"Type '{rm_name}' to confirm",
+                               key="rm_client_confirm")
+    if st.button("Remove client", key="rm_client_btn"):
+        if rm_confirm.strip() != rm_name:
+            st.error("Name doesn't match — nothing removed.")
+        else:
+            try:
+                if REMOTE:
+                    res = api.delete_client(rm_name)
+                    if res.get("_conflict"):
+                        st.error(res.get("message", "Could not remove client."))
+                    else:
+                        st.success(f"Removed '{rm_name}'.")
+                        st.session_state.clear()
+                        st.rerun()
+                else:
+                    from kira.registry import delete_client as delete_client_local
+                    delete_client_local(rm_name)
+                    st.success(f"Removed '{rm_name}'.")
+                    st.session_state.clear()
+                    st.rerun()
+            except FileNotFoundError as e:
+                st.error(str(e))
+
 n_inbox = (len(api.batches(state="review")) if REMOTE
            else len(batch_store.list(state="review")))
 tab_names = ["Convert", f"Inbox ({n_inbox})" if n_inbox else "Inbox",
@@ -628,6 +656,19 @@ with tab_dash:
     if overview_rows.empty:
         st.info("No clients yet.")
     else:
+        needs_masters = overview_rows[
+            (overview_rows["suppliers"] == 0) & (overview_rows["accounts"] == 0)
+        ]
+        if not needs_masters.empty:
+            names = ", ".join(needs_masters["client"])
+            st.warning(
+                f"**{names}** "
+                + ("was" if len(needs_masters) == 1 else "were")
+                + " discovered by a Kira Agent but has no master data yet — "
+                "AI coding falls back to weak fuzzy-matching until you upload "
+                "its chart of accounts, suppliers, customers, and tax codes "
+                "(sidebar → '+ Add a new client', re-use the same name)."
+            )
         st.dataframe(
             overview_rows.rename(columns={
                 "client": "Client", "suppliers": "Suppliers",

@@ -7,7 +7,10 @@ dozens of these side by side.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import time
 from pathlib import Path
 
 from .audit import AuditLog
@@ -64,6 +67,45 @@ def create_client(name: str, base: str | Path = "client_data") -> Path:
     for fname, header in _MASTER_HEADERS.items():
         (d / fname).write_text(header, encoding="utf-8")
     return d
+
+
+def register_client(name: str, base: str | Path = "client_data",
+                    **meta) -> bool:
+    """Idempotent create: used by the Agent to auto-discover a client from
+    the SQL PC and push it to the cloud. Returns True if newly created,
+    False if a client with this name already existed (left untouched — an
+    Agent push never overwrites real master data the console already has)."""
+    name = name.strip()
+    if not CLIENT_NAME_RE.match(name):
+        raise ValueError(
+            "Client name may only contain letters, numbers, underscores and "
+            "hyphens (no spaces or symbols).")
+    d = client_dir(name, base)
+    if d.exists():
+        return False
+    create_client(name, base)
+    meta_path = d / "kira_meta.json"
+    meta_path.write_text(json.dumps({
+        "discovered_via": "agent",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **meta,
+    }, indent=2, ensure_ascii=False), encoding="utf-8")
+    return True
+
+
+def client_meta(name: str, base: str | Path = "client_data") -> dict:
+    p = client_dir(name, base) / "kira_meta.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+def delete_client(name: str, base: str | Path = "client_data") -> None:
+    """Irreversible — removes the client's masters, learned rules, audit
+    trail, and posted-document registry. Does not touch batch queue records
+    (they just show a client name that no longer resolves)."""
+    d = client_dir(name, base)
+    if not d.exists():
+        raise FileNotFoundError(f"Client '{name}' does not exist.")
+    shutil.rmtree(d)
 
 
 def save_masters(name: str, files: dict[str, bytes],

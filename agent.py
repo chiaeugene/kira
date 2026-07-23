@@ -4,6 +4,12 @@ Outbound-only: polls Kira Cloud for approved batches, posts them into SQL
 via the free official SDK, reports the result back. No inbound ports, so it
 works behind any office router. Install once, forget it exists.
 
+Setup is company-first, not name-first: --setup scans this PC for SQL
+company files, and for each one you pick, the wizard best-effort reads its
+name and PUSHES it to Kira Cloud (POST /api/clients/register) — creating the
+client there automatically. You never type a client name into the console
+by hand just to make it match; you only ever pick from what's on this PC.
+
 Run:   python agent.py            (continuous; also what KiraAgent.exe runs)
        python agent.py --once     (single poll — tests / task scheduler)
 
@@ -20,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -151,6 +158,55 @@ def scan_sql_companies(roots: list[str] | None = None
     return sorted(set(dcfs)), sorted(set(fdbs))
 
 
+def _slugify(text: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "_", text).strip("_")
+    return (s or "CLIENT").upper()
+
+
+def try_extract_company_label(user: str, password: str, dcf_path: str,
+                              fdb_name: str) -> str | None:
+    """Best-effort: log into this company via the SDK and read its name.
+
+    The exact property name is unconfirmed until dump_fields()/a live-machine
+    check verifies it for this SQL version — several candidates are tried,
+    and any failure (SDK missing, wrong creds, unknown property) is silent.
+    Falls back to the FDB filename when this returns None.
+    """
+    try:
+        import win32com.client
+        app = win32com.client.Dispatch("SQLAcc.BizApp")
+        app.Login(user, password, dcf_path, fdb_name)
+        for attr in ("CompanyName", "CoyName", "CompanyFullName", "CoName"):
+            try:
+                val = getattr(app, attr)
+                if val:
+                    return str(val)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
+def register_client_on_cloud(server: str, token: str, name: str,
+                             label: str = "", fdb_name: str = "",
+                             agent_name: str = "") -> dict | None:
+    """Push a locally-discovered company to Kira Cloud. Idempotent — creates
+    the client if new, or confirms a link if that name already exists
+    (never overwrites real master data the console already has)."""
+    try:
+        r = httpx.post(f"{server}/api/clients/register",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"name": name, "label": label,
+                             "fdb_name": fdb_name, "agent_name": agent_name},
+                       timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"  Could not register with Kira Cloud: {e}")
+        return None
+
+
 def fetch_cloud_clients(server: str, token: str) -> list[dict]:
     """The Agent's own view of Kira Cloud's client list — read-only, uses
     the agent token (server accepts either token on this endpoint)."""
@@ -191,9 +247,8 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
             print(f"  - {c['name']}  ({c['suppliers']} suppliers, "
                   f"{c.get('customers', 0)} customers)")
     else:
-        print("  No clients found (or could not connect). Add clients in the "
-              "console first (sidebar -> '+ Add a new client'), then re-run "
-              "this wizard so the names match exactly.")
+        print("  No clients set up yet — that's fine, picking a company "
+              "below will create one automatically.")
 
     print("\nScanning this PC for SQL Accounting company files...")
     dcfs, fdbs = scan_sql_companies()
@@ -216,32 +271,58 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         print(f"  {i}. {f.name}   ({f})")
 
     clients: dict = {}
-    print("\nNow map each Kira client to its company database.")
-    print("(Client names must match the names in Kira Cloud exactly.)")
+    print("\nFor each company you want Kira to post into: pick it from the "
+          "list above, and Kira will register it with the cloud for you —")
+    print("you won't need to create anything in the console first.")
     while True:
-        cname = input("\nKira client name (Enter to finish): ").strip()
-        if not cname:
+        pick = input(f"\nCompany number to set up [1-{len(fdbs)}, "
+                     "Enter to finish]: ").strip()
+        if not pick:
             break
-        if known_names and cname not in known_names:
-            print(f"  '{cname}' was not found in Kira Cloud's client list.")
-            print(f"  Known clients: {', '.join(sorted(known_names))}")
-            if input("  Use this name anyway? [y/N]: ").strip().lower() != "y":
-                print("  Skipped — check the spelling matches the console, "
-                      "or create it there first.")
-                continue
-        pick = input(f"  Company database for {cname} [1-{len(fdbs)}]: ").strip()
         if not (pick.isdigit() and 1 <= int(pick) <= len(fdbs)):
             print("  Not a valid number — skipped.")
             continue
+        fdb = fdbs[int(pick) - 1]
+
         user = input("  SQL Accounting username [ADMIN]: ").strip() or "ADMIN"
         password = input("  SQL Accounting password: ").strip()
+
+        print("  Reading this company's details...")
+        label = try_extract_company_label(user, password, str(dcf), fdb.name)
+        if label:
+            print(f"  Found company name: {label}")
+        else:
+            label = fdb.stem
+            print("  Could not read the company name automatically "
+                  f"(needs SQL Accounting installed here) — using '{label}' "
+                  "as a placeholder label.")
+
+        suggested = _slugify(label)
+        if known_names:
+            print(f"  Existing Kira clients: {', '.join(sorted(known_names))}")
+        cname = input(f"  Kira client name [{suggested}] (type an existing "
+                     "name to link instead): ").strip() or suggested
+
+        reg = register_client_on_cloud(server, token, cname, label=label,
+                                       fdb_name=fdb.name, agent_name=agent_name)
+        if reg is None:
+            print("  Not registered (offline?) — will still save locally; "
+                  "re-run the wizard once you can reach Kira Cloud.")
+        elif reg["created"]:
+            print(f"  Registered new client '{cname}' in Kira Cloud — add "
+                  "its chart of accounts / suppliers / customers / tax codes "
+                  "in the console when convenient (AI coding improves once "
+                  "you do; it still works on a fallback until then).")
+            known_names.add(cname)
+        else:
+            print(f"  Linked to the existing client '{cname}' in Kira Cloud.")
+
         clients[cname] = {
             "dry_run": True,
             "user": user, "password": password,
-            "dcf_path": str(dcf), "fdb_name": fdbs[int(pick) - 1].name,
+            "dcf_path": str(dcf), "fdb_name": fdb.name,
         }
-        print(f"  Mapped {cname} -> {fdbs[int(pick) - 1].name} "
-              "(dry-run until the go-live test).")
+        print(f"  Mapped {cname} -> {fdb.name} (dry-run until the go-live test).")
 
     if not clients:
         print("No clients mapped — nothing written.")

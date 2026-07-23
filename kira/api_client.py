@@ -55,6 +55,13 @@ class KiraAPI:
     def create_client(self, name: str) -> dict:
         return self._post("/api/clients", {"name": name})
 
+    def delete_client(self, name: str) -> dict:
+        r = self.http.delete(f"/api/clients/{name}")
+        if r.status_code == 404:
+            return {"_conflict": True, "message": r.json().get("detail")}
+        r.raise_for_status()
+        return r.json()
+
     def upload_masters(self, client: str, files: dict[str, bytes]) -> dict:
         """files: {"chart_of_accounts.csv": bytes, "suppliers.csv": bytes, ...}"""
         field_map = {"chart_of_accounts.csv": "chart_of_accounts",

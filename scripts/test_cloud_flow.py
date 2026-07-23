@@ -217,6 +217,54 @@ r = api.post("/api/clients", headers=FIRM, json={"name": "bad name!"})
 assert r.status_code == 422, r.status_code
 print("[add-client] invalid characters rejected  OK")
 
+# 8c. Agent-driven discovery: register (agent token, not firm token) creates
+#     a brand-new client, then a second register with the SAME name links
+#     without touching whatever masters got added in between.
+AGENT = {"Authorization": "Bearer dev-agent-token-change-me"}
+r = api.post("/api/clients/register", headers=AGENT,
+             json={"name": "DISCOVERED_CO", "label": "Discovered Sdn Bhd",
+                  "fdb_name": "ACC-7777.FDB", "agent_name": "test-office-pc"})
+assert r.status_code == 200 and r.json()["created"] is True, r.text
+print("[register] agent token creates a new client via discovery")
+
+# firm token cannot use the agent-only endpoint, and vice versa is blocked too
+r = api.post("/api/clients/register", headers=FIRM, json={"name": "X"})
+assert r.status_code == 401, "register is agent-only, firm token must be rejected"
+print("[register] firm token rejected on the agent-only register endpoint  OK")
+
+r = api.post(f"/api/clients/DISCOVERED_CO/masters", headers=FIRM,
+             files={"suppliers": ("suppliers.csv",
+                                 b"code,name\n1,Real One\n", "text/csv")})
+assert r.status_code == 200
+
+r = api.post("/api/clients/register", headers=AGENT,
+             json={"name": "DISCOVERED_CO", "label": "should be ignored",
+                  "fdb_name": "ACC-7777.FDB"})
+assert r.status_code == 200 and r.json()["created"] is False
+r = api.get("/api/clients", headers=FIRM)
+disc = next(c for c in r.json() if c["name"] == "DISCOVERED_CO")
+assert disc["suppliers"] == 1, disc  # untouched by the second register
+print("[register] re-registering links to the existing client, masters kept")
+
+# 8d. delete endpoint (firm-only, irreversible)
+r = api.delete("/api/clients/DISCOVERED_CO", headers=FIRM)
+assert r.status_code == 200 and r.json()["deleted"], r.text
+r = api.get("/api/clients", headers=FIRM)
+assert "DISCOVERED_CO" not in {c["name"] for c in r.json()}
+r = api.delete("/api/clients/DISCOVERED_CO", headers=FIRM)
+assert r.status_code == 404
+print("[delete] client removed via API, repeat delete 404s cleanly")
+
+r = api.delete("/api/clients/NEW_CO", headers=AGENT)
+assert r.status_code == 401, "delete must be firm-only, agent token rejected"
+print("[delete] agent token rejected on the firm-only delete endpoint  OK")
+
+# 8e. wizard helper: slugify turns an extracted company name into a safe id
+from agent import _slugify
+assert _slugify("Maju Jaya Enterprise Sdn Bhd") == "MAJU_JAYA_ENTERPRISE_SDN_BHD"
+assert _slugify("  weird!! name--123  ") == "WEIRD_NAME_123"
+print("[wizard] _slugify produces valid client-name strings")
+
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()
 print(f"[overview] queue: {ov['queue']}")
