@@ -60,9 +60,9 @@ if _CONSOLE_PW and not st.session_state.get("authed"):
         with st.form("login"):
             pw_try = st.text_input("Password", type="password",
                                    label_visibility="collapsed",
-                                   placeholder="Password")
+                                   placeholder="Password", key="login_pw")
             if st.form_submit_button("Sign in", type="primary",
-                                     use_container_width=True):
+                                     width="stretch"):
                 if pw_try == _CONSOLE_PW:
                     st.session_state.authed = True
                     st.rerun()
@@ -106,11 +106,24 @@ if not clients:
     st.sidebar.error("No clients found.")
     st.stop()
 
+def reset_client_workspace() -> None:
+    """Clear per-client working state ONLY. Never touches the login
+    (authed) or the client dropdown itself — clearing those was the cause
+    of the console 'bouncing' back to the sign-in page on every client
+    switch and upload."""
+    doomed = [k for k in st.session_state.keys()
+              if k in ("coded", "notes", "upload_result")
+              or k.startswith(("editor_", "rows_", "repairs_"))]
+    for k in doomed:
+        del st.session_state[k]
+
+
 default_ix = (clients.index(CONFIG["client"]["name"])
               if CONFIG["client"]["name"] in clients else 0)
-client_name = st.sidebar.selectbox("Client", clients, index=default_ix)
+client_name = st.sidebar.selectbox("Client", clients, index=default_ix,
+                                   key="client_select")
 if st.session_state.get("client") != client_name:
-    st.session_state.clear()
+    reset_client_workspace()
     st.session_state.client = client_name
 
 if REMOTE:
@@ -193,13 +206,17 @@ with st.sidebar.expander("Remove a client"):
                         st.error(res.get("message", "Could not remove client."))
                     else:
                         st.success(f"Removed '{rm_name}'.")
-                        st.session_state.clear()
+                        reset_client_workspace()
+                        for k in ("client", "client_select"):
+                            st.session_state.pop(k, None)
                         st.rerun()
                 else:
                     from kira.registry import delete_client as delete_client_local
                     delete_client_local(rm_name)
                     st.success(f"Removed '{rm_name}'.")
-                    st.session_state.clear()
+                    reset_client_workspace()
+                    for k in ("client", "client_select"):
+                        st.session_state.pop(k, None)
                     st.rerun()
             except FileNotFoundError as e:
                 st.error(str(e))
@@ -220,7 +237,7 @@ def show_issues(issues: pd.DataFrame, counts: dict) -> None:
         f"Validation — {counts['error']} error(s), {counts['warning']} "
         f"warning(s), {counts['info']} note(s)", expanded=counts["error"] > 0,
     ):
-        st.dataframe(issues, use_container_width=True, hide_index=True)
+        st.dataframe(issues, width="stretch", hide_index=True)
 
 
 def review_editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
@@ -239,7 +256,7 @@ def review_editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
             "supplier": st.column_config.TextColumn("party"),
             "supplier_code": st.column_config.TextColumn("party_code"),
         },
-        use_container_width=True, num_rows="fixed", key=key,
+        width="stretch", num_rows="fixed", key=key,
     )
 
 
@@ -262,7 +279,7 @@ def show_repairs(fixes: pd.DataFrame, key: str) -> bool:
     with st.expander(f"Suggested repairs — Kira can fix "
                      f"{len(fixes)} issue(s) for you", expanded=True):
         st.dataframe(fixes.drop(columns=["row_id"], errors="ignore"),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
         st.caption("Applying updates the lines below (duplicates are removed). "
                    "You still review and approve — and everything is "
                    "re-checked at approval.")
@@ -418,7 +435,7 @@ with tab_batch:
                     else:
                         st.error(info["message"])
                         st.dataframe(pd.DataFrame(info["issues"]),
-                                     use_container_width=True, hide_index=True)
+                                     width="stretch", hide_index=True)
                 else:
                     for _, r in approved.iterrows():
                         store.learn(r["supplier"], r["supplier_code"],
@@ -501,7 +518,7 @@ with tab_inbox:
                     st.error(f"{res.get('message')} — {res.get('errors')} "
                              f"error(s), {res.get('blank_codes')} blank code(s).")
                     st.dataframe(pd.DataFrame(res.get("issues", [])),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
                 else:
                     st.success("Approved — queued for the Kira Agent.")
                     time.sleep(1.2)
@@ -517,7 +534,7 @@ with tab_inbox:
                     st.error(f"{info['message']} — {info['errors']} error(s), "
                              f"{info['blank_codes']} line(s) missing codes.")
                     st.dataframe(pd.DataFrame(info["issues"]),
-                                 use_container_width=True, hide_index=True)
+                                 width="stretch", hide_index=True)
         if r.button("Reject", key=f"rj_{bid}"):
             if REMOTE:
                 api.reject(bid, "rejected in console")
@@ -565,7 +582,7 @@ with tab_conn:
                 "modes": ", ".join(f"{c}:{m}" for c, m in
                                    a.get("modes", {}).items()),
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True,
+        st.dataframe(pd.DataFrame(rows), width="stretch",
                      hide_index=True)
         agent_for_client = next(
             (n for n, a in agents.items()
@@ -631,7 +648,7 @@ with tab_dash:
                 "state": s["state"], "channel": s["channel"],
                 "lines": s["lines"], "RM": s["total_rm"],
             } for s in reversed(all_summaries)]),
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
         overview_rows = pd.DataFrame(ov["clients"])
     else:
         all_batches = batch_store.list()
@@ -647,7 +664,7 @@ with tab_dash:
                 "RM": b["total_rm"], "created": b["created_at"],
                 "files": ", ".join(b["source_files"]),
             } for b in reversed(all_batches)]),
-                use_container_width=True, hide_index=True)
+                width="stretch", hide_index=True)
         else:
             st.caption("No batches yet.")
         overview_rows = pd.DataFrame(firm_overview())
@@ -676,7 +693,7 @@ with tab_dash:
                 "batches_posted": "Batches", "lines_posted": "Lines",
                 "total_rm": "Total RM", "auto_accuracy": "Auto-accuracy",
             }),
-            use_container_width=True, hide_index=True,
+            width="stretch", hide_index=True,
         )
         st.caption(
             "Auto-accuracy = share of posted lines the bookkeeper did not have "
@@ -720,17 +737,17 @@ with tab_history:
         st.markdown("**Batches**")
         if not batches_log.empty:
             st.dataframe(batches_log.drop(columns=["event"], errors="ignore"),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
         else:
             st.caption("None yet.")
         st.markdown("**Corrections (what the AI got wrong — training signal)**")
         if not corrections.empty:
             st.dataframe(corrections.drop(columns=["event"], errors="ignore"),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
         else:
             st.caption("None yet.")
         st.markdown("**Learned rules**")
         if not rules_rows.empty:
-            st.dataframe(rules_rows, use_container_width=True, hide_index=True)
+            st.dataframe(rules_rows, width="stretch", hide_index=True)
         else:
             st.caption("No rules learned yet.")

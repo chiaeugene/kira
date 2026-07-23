@@ -141,9 +141,19 @@ SCAN_ROOTS = [r"C:\eStream", r"D:\eStream", r"C:\SQLAccounting",
               r"C:\estream", r"C:\Program Files (x86)\eStream"]
 
 
+def _is_payroll(p: Path) -> bool:
+    """SQL Payroll databases live alongside SQL Accounting ones but Kira
+    only posts to Accounting — listing 17 PAY-xxxx files just confuses the
+    person installing (real field feedback)."""
+    if p.name.upper().startswith("PAY-"):
+        return True
+    return any("PAYROLL" in part.upper() for part in p.parts)
+
+
 def scan_sql_companies(roots: list[str] | None = None
-                       ) -> tuple[list[Path], list[Path]]:
-    """Find SQL Accounting DCF files and company .FDB databases on this PC."""
+                       ) -> tuple[list[Path], list[Path], int]:
+    """Find SQL Accounting DCF files and company .FDB databases on this PC.
+    Returns (dcfs, accounting_fdbs, n_payroll_skipped)."""
     dcfs: list[Path] = []
     fdbs: list[Path] = []
     for root in (roots or SCAN_ROOTS):
@@ -151,11 +161,13 @@ def scan_sql_companies(roots: list[str] | None = None
         if not r.exists():
             continue
         try:
-            dcfs += list(r.rglob("*.DCF"))
+            dcfs += [d for d in r.rglob("*.DCF") if not _is_payroll(d)]
             fdbs += list(r.rglob("*.FDB"))
         except (PermissionError, OSError):
             continue
-    return sorted(set(dcfs)), sorted(set(fdbs))
+    fdbs = sorted(set(fdbs))
+    accounting = [f for f in fdbs if not _is_payroll(f)]
+    return sorted(set(dcfs)), accounting, len(fdbs) - len(accounting)
 
 
 def _slugify(text: str) -> str:
@@ -251,7 +263,10 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
               "below will create one automatically.")
 
     print("\nScanning this PC for SQL Accounting company files...")
-    dcfs, fdbs = scan_sql_companies()
+    dcfs, fdbs, n_payroll = scan_sql_companies()
+    if n_payroll:
+        print(f"  (skipped {n_payroll} SQL Payroll database(s) — Kira posts "
+              "to SQL Accounting only)")
     if not dcfs or not fdbs:
         print("  No SQL Accounting files found in the usual folders.")
         print("  In SQL Accounting, open File -> Open Company to see the "
@@ -293,9 +308,12 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
             print(f"  Found company name: {label}")
         else:
             label = fdb.stem
-            print("  Could not read the company name automatically "
-                  f"(needs SQL Accounting installed here) — using '{label}' "
-                  "as a placeholder label.")
+            print("  Could not read the company name automatically — the "
+                  "SDK didn't respond (SQL Accounting app not available, or "
+                  "the username/password wasn't accepted).")
+            print(f"  Using '{label}' as a placeholder — this is fine; the "
+                  "login will be properly verified at the dry-run/go-live "
+                  "step.")
 
         suggested = _slugify(label)
         if known_names:

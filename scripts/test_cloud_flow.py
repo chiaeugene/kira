@@ -159,17 +159,22 @@ assert any(f["field"] == "__drop__" for f in repair_rows), repair_rows[:2]
 print(f"[repairs] endpoint proposes {len(repair_rows)} fix(es) "
       "incl. duplicate removal")
 
-# 7c. agent setup scanner finds DCF + FDB files in an eStream-style tree
+# 7c. agent setup scanner finds accounting DBs and SKIPS payroll ones
+# (real field feedback: 17 PAY-xxxx files confused the installer)
 import tempfile as _tf
 from agent import scan_sql_companies
-fake = Path(_tf.mkdtemp()) / "eStream" / "SQLAccounting"
-(fake / "Share").mkdir(parents=True)
-(fake / "DB").mkdir()
-(fake / "Share" / "Default.DCF").write_text("x")
-(fake / "DB" / "ACC-0001.FDB").write_text("x")
-dcfs, fdbs = scan_sql_companies([str(fake.parent)])
-assert len(dcfs) == 1 and len(fdbs) == 1
-print(f"[wizard] scanner found {dcfs[0].name} + {fdbs[0].name}")
+fake = Path(_tf.mkdtemp()) / "eStream"
+(fake / "SQLAccounting" / "Share").mkdir(parents=True)
+(fake / "SQLAccounting" / "DB").mkdir()
+(fake / "SQL Payroll" / "DB").mkdir(parents=True)
+(fake / "SQLAccounting" / "Share" / "Default.DCF").write_text("x")
+(fake / "SQLAccounting" / "DB" / "ACC-0001.FDB").write_text("x")
+(fake / "SQL Payroll" / "DB" / "PAY-0001.FDB").write_text("x")
+(fake / "SQL Payroll" / "DB" / "PAY-0002.FDB").write_text("x")
+dcfs, fdbs, n_pay = scan_sql_companies([str(fake)])
+assert len(dcfs) == 1 and len(fdbs) == 1 and n_pay == 2, (dcfs, fdbs, n_pay)
+assert fdbs[0].name == "ACC-0001.FDB"
+print(f"[wizard] scanner found {fdbs[0].name}, skipped {n_pay} payroll DBs")
 
 # 8. reject flow (the Telegram batch)
 r = api.post(f"/api/batches/{tg_bid}/reject", headers=FIRM,
