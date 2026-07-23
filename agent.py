@@ -1,4 +1,4 @@
-"""Kira Agent — runs on the PC where SQL Accounting is installed.
+"""Kira Agent - runs on the PC where SQL Accounting is installed.
 
 Outbound-only: polls Kira Cloud for approved batches, posts them into SQL
 via the free official SDK, reports the result back. No inbound ports, so it
@@ -6,16 +6,16 @@ works behind any office router. Install once, forget it exists.
 
 Setup is company-first, not name-first: --setup scans this PC for SQL
 company files, and for each one you pick, the wizard best-effort reads its
-name and PUSHES it to Kira Cloud (POST /api/clients/register) — creating the
+name and PUSHES it to Kira Cloud (POST /api/clients/register) - creating the
 client there automatically. You never type a client name into the console
 by hand just to make it match; you only ever pick from what's on this PC.
 
 Run:   python agent.py            (continuous; also what KiraAgent.exe runs)
-       python agent.py --once     (single poll — tests / task scheduler)
+       python agent.py --once     (single poll - tests / task scheduler)
 
 The console window IS the local dashboard: it shows a startup summary and a
 live line for everything the Agent does. The same lines are appended to
-kira_agent.log next to the program — the permanent local trail.
+kira_agent.log next to the program - the permanent local trail.
 
 Config: agent_config.yaml (same folder), overridable via .env / env vars
 KIRA_SERVER_URL and KIRA_AGENT_TOKEN.
@@ -38,7 +38,14 @@ from kira.batches import records_to_df
 from kira.envfile import load_env
 from kira.poster import SQLConfig, post_batch
 
-load_env()  # .env can carry KIRA_SERVER_URL / KIRA_AGENT_TOKEN
+# Everything the Agent reads/writes lives NEXT TO THE PROGRAM, never in
+# whatever folder Windows happens to launch it from (shortcuts / "Run as
+# administrator" change the working directory and used to make the Agent
+# lose its own config and re-run setup every time).
+BASE_DIR = (Path(sys.executable).parent if getattr(sys, "frozen", False)
+            else Path(__file__).parent)
+
+load_env(BASE_DIR / ".env")  # can carry KIRA_SERVER_URL / KIRA_AGENT_TOKEN
 
 log = logging.getLogger("kira.agent")
 
@@ -48,7 +55,7 @@ def setup_logging() -> None:
     fmt = logging.Formatter("%(asctime)s  %(message)s", "%Y-%m-%d %H:%M:%S")
     out = logging.StreamHandler(sys.stdout)
     out.setFormatter(fmt)
-    filed = logging.FileHandler("kira_agent.log", encoding="utf-8")
+    filed = logging.FileHandler(BASE_DIR / "kira_agent.log", encoding="utf-8")
     filed.setFormatter(fmt)
     log.addHandler(out)
     log.addHandler(filed)
@@ -69,7 +76,7 @@ def banner(cfg: dict) -> None:
     for name, c in cfg["clients"].items():
         mode = "DRY RUN (simulate only)" if c.get("dry_run", True) else "LIVE POSTING"
         log.info("Serves:  %-24s -> %s  [%s]", name, c.get("fdb_name", "?"), mode)
-    log.info("Log trail: %s", Path("kira_agent.log").resolve())
+    log.info("Log trail: %s", BASE_DIR / "kira_agent.log")
 
     cloud_clients = fetch_cloud_clients(cfg["server_url"], cfg["agent_token"])
     if cloud_clients:
@@ -78,7 +85,7 @@ def banner(cfg: dict) -> None:
         if unknown:
             log.error("Configured client(s) not found in Kira Cloud: %s",
                       ", ".join(sorted(unknown)))
-            log.error("  Check spelling matches the console exactly — "
+            log.error("  Check spelling matches the console exactly - "
                       "batches for these will never be found.")
 
     log.info("Keep this window open. Close it to stop the Agent.")
@@ -87,6 +94,12 @@ def banner(cfg: dict) -> None:
 
 def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
     """One poll cycle. Returns 'idle', 'posted', or 'failed'."""
+    if not cfg.get("clients"):
+        # An empty client list would match ANY batch on the server side -
+        # never poll for work this agent has no SQL mapping for.
+        log.warning("No companies mapped in agent_config.yaml - run "
+                    "KiraAgent.exe --setup to add one.")
+        return "idle"
     http = client or httpx.Client(base_url=cfg["server_url"], timeout=60)
     headers = {"Authorization": f"Bearer {cfg['agent_token']}"}
 
@@ -105,10 +118,10 @@ def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
     log.info("BATCH RECEIVED  %s | client %s | %s lines | RM %s",
              bid, client_name, len(job["rows"]), f"{job['total_rm']:,.2f}")
 
-    sql_cfg = SQLConfig(**cfg["clients"][client_name])
     try:
+        sql_cfg = SQLConfig(**cfg["clients"][client_name])
         df = records_to_df(job["rows"])
-        result = post_batch(df, sql_cfg, out_dir="posted")
+        result = post_batch(df, sql_cfg, out_dir=str(BASE_DIR / "posted"))
         ok = len(result.get("errors", [])) == 0
         for inv in result.get("posted", []):
             log.info("  posted invoice: %s | %s | %s line(s)",
@@ -143,7 +156,7 @@ SCAN_ROOTS = [r"C:\eStream", r"D:\eStream", r"C:\SQLAccounting",
 
 def _is_payroll(p: Path) -> bool:
     """SQL Payroll databases live alongside SQL Accounting ones but Kira
-    only posts to Accounting — listing 17 PAY-xxxx files just confuses the
+    only posts to Accounting - listing 17 PAY-xxxx files just confuses the
     person installing (real field feedback)."""
     if p.name.upper().startswith("PAY-"):
         return True
@@ -180,7 +193,7 @@ def try_extract_company_label(user: str, password: str, dcf_path: str,
     """Best-effort: log into this company via the SDK and read its name.
 
     The exact property name is unconfirmed until dump_fields()/a live-machine
-    check verifies it for this SQL version — several candidates are tried,
+    check verifies it for this SQL version - several candidates are tried,
     and any failure (SDK missing, wrong creds, unknown property) is silent.
     Falls back to the FDB filename when this returns None.
     """
@@ -203,7 +216,7 @@ def try_extract_company_label(user: str, password: str, dcf_path: str,
 def register_client_on_cloud(server: str, token: str, name: str,
                              label: str = "", fdb_name: str = "",
                              agent_name: str = "") -> dict | None:
-    """Push a locally-discovered company to Kira Cloud. Idempotent — creates
+    """Push a locally-discovered company to Kira Cloud. Idempotent - creates
     the client if new, or confirms a link if that name already exists
     (never overwrites real master data the console already has)."""
     try:
@@ -220,7 +233,7 @@ def register_client_on_cloud(server: str, token: str, name: str,
 
 
 def fetch_cloud_clients(server: str, token: str) -> list[dict]:
-    """The Agent's own view of Kira Cloud's client list — read-only, uses
+    """The Agent's own view of Kira Cloud's client list - read-only, uses
     the agent token (server accepts either token on this endpoint)."""
     try:
         r = httpx.get(f"{server}/api/clients",
@@ -232,14 +245,40 @@ def fetch_cloud_clients(server: str, token: str) -> list[dict]:
         return []
 
 
+def _save_cfg(config_path: str, agent_name: str, server: str, token: str,
+              clients: dict) -> None:
+    Path(config_path).write_text(yaml.safe_dump({
+        "agent_name": agent_name, "server_url": server,
+        "agent_token": token, "poll_seconds": 30, "clients": clients,
+    }, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
 def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
-    """Interactive first-run setup: scan for company files, map them to Kira
-    clients, write agent_config.yaml. Returns True when a config was written."""
+    """Interactive setup: scan for company files, map them to Kira clients.
+
+    SAVES AFTER EVERY COMPANY - closing the window never loses progress
+    (real field feedback: staff closed the window at the 'Enter to finish'
+    prompt and had to redo the whole setup). Re-running the wizard ADDS to
+    the existing setup instead of starting over."""
     print()
     print("KIRA AGENT SETUP")
     print("-" * 50)
-    server = os.environ.get("KIRA_SERVER_URL", "")
-    token = os.environ.get("KIRA_AGENT_TOKEN", "")
+
+    existing: dict = {}
+    if Path(config_path).exists():
+        try:
+            existing = yaml.safe_load(
+                Path(config_path).read_text(encoding="utf-8")) or {}
+        except Exception:
+            existing = {}
+    clients: dict = dict(existing.get("clients") or {})
+    if clients:
+        print(f"Existing setup found - {len(clients)} company(ies) already "
+              f"mapped: {', '.join(sorted(clients))}")
+        print("New companies you pick below will be ADDED to that.\n")
+
+    server = os.environ.get("KIRA_SERVER_URL", "") or existing.get("server_url", "")
+    token = os.environ.get("KIRA_AGENT_TOKEN", "") or existing.get("agent_token", "")
     if not server:
         server = input("Kira Cloud URL (e.g. https://kira-cloud.onrender.com): ").strip()
     else:
@@ -248,7 +287,9 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         token = input("Agent token (from your Kira administrator): ").strip()
     else:
         print("Agent token:     (from .env)")
-    agent_name = input("Name this PC (e.g. office-pc-1): ").strip() or "office-pc-1"
+    default_name = existing.get("agent_name") or "office-pc-1"
+    agent_name = (input(f"Name this PC [{default_name}]: ").strip()
+                  or default_name)
 
     print("\nFetching the client list from Kira Cloud...")
     cloud_clients = fetch_cloud_clients(server, token)
@@ -259,13 +300,13 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
             print(f"  - {c['name']}  ({c['suppliers']} suppliers, "
                   f"{c.get('customers', 0)} customers)")
     else:
-        print("  No clients set up yet — that's fine, picking a company "
+        print("  No clients set up yet - that's fine, picking a company "
               "below will create one automatically.")
 
     print("\nScanning this PC for SQL Accounting company files...")
     dcfs, fdbs, n_payroll = scan_sql_companies()
     if n_payroll:
-        print(f"  (skipped {n_payroll} SQL Payroll database(s) — Kira posts "
+        print(f"  (skipped {n_payroll} SQL Payroll database(s) - Kira posts "
               "to SQL Accounting only)")
     if not dcfs or not fdbs:
         print("  No SQL Accounting files found in the usual folders.")
@@ -285,17 +326,23 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
     for i, f in enumerate(fdbs, 1):
         print(f"  {i}. {f.name}   ({f})")
 
-    clients: dict = {}
     print("\nFor each company you want Kira to post into: pick it from the "
-          "list above, and Kira will register it with the cloud for you —")
+          "list above, and Kira will register it with the cloud for you -")
     print("you won't need to create anything in the console first.")
+    print("(Each company is SAVED IMMEDIATELY - you can close this window "
+          "at any point without losing what's done.)")
     while True:
-        pick = input(f"\nCompany number to set up [1-{len(fdbs)}, "
-                     "Enter to finish]: ").strip()
+        try:
+            pick = input(f"\nCompany number to set up [1-{len(fdbs)}, "
+                         "Enter to finish]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\n  (window interrupted - everything mapped so far is "
+                  "already saved)")
+            break
         if not pick:
             break
         if not (pick.isdigit() and 1 <= int(pick) <= len(fdbs)):
-            print("  Not a valid number — skipped.")
+            print("  Not a valid number - skipped.")
             continue
         fdb = fdbs[int(pick) - 1]
 
@@ -308,10 +355,10 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
             print(f"  Found company name: {label}")
         else:
             label = fdb.stem
-            print("  Could not read the company name automatically — the "
+            print("  Could not read the company name automatically - the "
                   "SDK didn't respond (SQL Accounting app not available, or "
                   "the username/password wasn't accepted).")
-            print(f"  Using '{label}' as a placeholder — this is fine; the "
+            print(f"  Using '{label}' as a placeholder - this is fine; the "
                   "login will be properly verified at the dry-run/go-live "
                   "step.")
 
@@ -324,10 +371,10 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         reg = register_client_on_cloud(server, token, cname, label=label,
                                        fdb_name=fdb.name, agent_name=agent_name)
         if reg is None:
-            print("  Not registered (offline?) — will still save locally; "
+            print("  Not registered (offline?) - will still save locally; "
                   "re-run the wizard once you can reach Kira Cloud.")
         elif reg["created"]:
-            print(f"  Registered new client '{cname}' in Kira Cloud — add "
+            print(f"  Registered new client '{cname}' in Kira Cloud - add "
                   "its chart of accounts / suppliers / customers / tax codes "
                   "in the console when convenient (AI coding improves once "
                   "you do; it still works on a fallback until then).")
@@ -340,18 +387,20 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
             "user": user, "password": password,
             "dcf_path": str(dcf), "fdb_name": fdb.name,
         }
-        print(f"  Mapped {cname} -> {fdb.name} (dry-run until the go-live test).")
+        _save_cfg(config_path, agent_name, server, token, clients)
+        print(f"  Mapped {cname} -> {fdb.name} (dry-run until the go-live "
+              f"test) - SAVED to {config_path}.")
 
     if not clients:
-        print("No clients mapped — nothing written.")
+        print("No clients mapped - nothing written.")
         return False
 
-    Path(config_path).write_text(yaml.safe_dump({
-        "agent_name": agent_name, "server_url": server,
-        "agent_token": token, "poll_seconds": 30, "clients": clients,
-    }, allow_unicode=True, sort_keys=False), encoding="utf-8")
-    print(f"\nSaved {config_path}. Every company starts in DRY RUN — follow "
-          "the go-live checklist in AGENT_SETUP.md before switching to live.")
+    _save_cfg(config_path, agent_name, server, token, clients)
+    print(f"\nSetup complete: {len(clients)} company(ies) in {config_path}. "
+          "Next launch goes STRAIGHT to work - no setup questions.")
+    print("To add another company later, run:  KiraAgent.exe --setup")
+    print("Every company starts in DRY RUN - follow the go-live checklist "
+          "in AGENT_SETUP.md before switching to live.")
     return True
 
 
@@ -360,14 +409,14 @@ def main() -> int:
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--setup", action="store_true",
                     help="run the interactive setup wizard")
-    ap.add_argument("--config", default="agent_config.yaml")
+    ap.add_argument("--config", default=str(BASE_DIR / "agent_config.yaml"))
     args = ap.parse_args()
 
     setup_logging()
 
     if args.setup or not Path(args.config).exists():
         if not args.setup:
-            print("No agent_config.yaml found — starting first-time setup.")
+            print(f"No config at {args.config} - starting first-time setup.")
         if not setup_wizard(args.config):
             if not args.once:
                 input("Press Enter to close...")
@@ -383,6 +432,14 @@ def main() -> int:
             input("Press Enter to close...")
         return 2
 
+    if not cfg.get("clients"):
+        print("The saved config has no companies mapped yet - running setup.")
+        if not setup_wizard(args.config):
+            if not args.once:
+                input("Press Enter to close...")
+            return 2
+        cfg = load_cfg(args.config)
+
     banner(cfg)
 
     if args.once:
@@ -391,7 +448,7 @@ def main() -> int:
             return 0
         except Exception as e:
             log.error("Could not reach Kira Cloud: %s", e)
-            log.error("(Server may be restarting — try again in a minute.)")
+            log.error("(Server may be restarting - try again in a minute.)")
             return 1
 
     idle_streak = 0
@@ -408,7 +465,7 @@ def main() -> int:
             log.info("Stopped by user.")
             return 0
         except Exception as e:
-            log.error("Connection problem: %s — retrying shortly", e)
+            log.error("Connection problem: %s - retrying shortly", e)
         time.sleep(cfg.get("poll_seconds", 30))
 
 
