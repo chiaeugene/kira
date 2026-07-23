@@ -11,12 +11,13 @@ if [ -d /var/data ]; then
     mkdir -p /var/data/batches /var/data/posted
     touch /var/data/.seeded
   else
-    # Sync master/reference data from the repo on every deploy (new clients,
-    # new master files, updated demo masters) WITHOUT touching learned state
-    # (rules.json, audit.jsonl, posted_registry.json, file_log.json stay).
+    # Sync master/reference data from the repo on every deploy WITHOUT
+    # touching learned state (rules.json, audit.jsonl, posted_registry.json,
+    # file_log.json stay) and WITHOUT resurrecting clients that were deleted
+    # in the console — only clients still present on the disk are updated.
     for dir in client_data/*/; do
       name=$(basename "$dir")
-      mkdir -p "/var/data/client_data/$name"
+      [ -d "/var/data/client_data/$name" ] || continue
       for f in chart_of_accounts.csv suppliers.csv customers.csv tax_codes.csv; do
         [ -f "$dir$f" ] && cp -f "$dir$f" "/var/data/client_data/$name/$f"
       done
