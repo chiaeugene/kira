@@ -63,6 +63,17 @@ def banner(cfg: dict) -> None:
         mode = "DRY RUN (simulate only)" if c.get("dry_run", True) else "LIVE POSTING"
         log.info("Serves:  %-24s -> %s  [%s]", name, c.get("fdb_name", "?"), mode)
     log.info("Log trail: %s", Path("kira_agent.log").resolve())
+
+    cloud_clients = fetch_cloud_clients(cfg["server_url"], cfg["agent_token"])
+    if cloud_clients:
+        known = {c["name"] for c in cloud_clients}
+        unknown = set(cfg["clients"]) - known
+        if unknown:
+            log.error("Configured client(s) not found in Kira Cloud: %s",
+                      ", ".join(sorted(unknown)))
+            log.error("  Check spelling matches the console exactly — "
+                      "batches for these will never be found.")
+
     log.info("Keep this window open. Close it to stop the Agent.")
     log.info("=" * 62)
 
@@ -140,6 +151,19 @@ def scan_sql_companies(roots: list[str] | None = None
     return sorted(set(dcfs)), sorted(set(fdbs))
 
 
+def fetch_cloud_clients(server: str, token: str) -> list[dict]:
+    """The Agent's own view of Kira Cloud's client list — read-only, uses
+    the agent token (server accepts either token on this endpoint)."""
+    try:
+        r = httpx.get(f"{server}/api/clients",
+                      headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"  (Could not fetch the client list from Kira Cloud: {e})")
+        return []
+
+
 def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
     """Interactive first-run setup: scan for company files, map them to Kira
     clients, write agent_config.yaml. Returns True when a config was written."""
@@ -157,6 +181,19 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
     else:
         print("Agent token:     (from .env)")
     agent_name = input("Name this PC (e.g. office-pc-1): ").strip() or "office-pc-1"
+
+    print("\nFetching the client list from Kira Cloud...")
+    cloud_clients = fetch_cloud_clients(server, token)
+    known_names = {c["name"] for c in cloud_clients}
+    if cloud_clients:
+        print("Clients already set up in Kira Cloud:")
+        for c in cloud_clients:
+            print(f"  - {c['name']}  ({c['suppliers']} suppliers, "
+                  f"{c.get('customers', 0)} customers)")
+    else:
+        print("  No clients found (or could not connect). Add clients in the "
+              "console first (sidebar -> '+ Add a new client'), then re-run "
+              "this wizard so the names match exactly.")
 
     print("\nScanning this PC for SQL Accounting company files...")
     dcfs, fdbs = scan_sql_companies()
@@ -185,6 +222,13 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         cname = input("\nKira client name (Enter to finish): ").strip()
         if not cname:
             break
+        if known_names and cname not in known_names:
+            print(f"  '{cname}' was not found in Kira Cloud's client list.")
+            print(f"  Known clients: {', '.join(sorted(known_names))}")
+            if input("  Use this name anyway? [y/N]: ").strip().lower() != "y":
+                print("  Skipped — check the spelling matches the console, "
+                      "or create it there first.")
+                continue
         pick = input(f"  Company database for {cname} [1-{len(fdbs)}]: ").strip()
         if not (pick.isdigit() and 1 <= int(pick) <= len(fdbs)):
             print("  Not a valid number — skipped.")

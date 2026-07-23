@@ -177,10 +177,54 @@ r = api.post(f"/api/batches/{tg_bid}/reject", headers=FIRM,
 assert r.status_code == 200 and r.json()["state"] == "rejected"
 print("[reject] telegram batch rejected, kept in history")
 
+# 8b. add-a-new-client flow: create -> upload masters -> appears in list ->
+#     agent wizard's fetch sees it -> duplicate name rejected -> bad name rejected
+r = api.post("/api/clients", headers=FIRM, json={"name": "NEW_CO"})
+assert r.status_code == 200 and r.json()["created"], r.text
+print("[add-client] created NEW_CO")
+
+r = api.post(
+    "/api/clients/NEW_CO/masters", headers=FIRM,
+    files={"suppliers": ("suppliers.csv", b"code,name\n900-X,Test Supplier\n",
+                         "text/csv")},
+)
+assert r.status_code == 200 and "suppliers.csv" in r.json()["saved"]
+print("[add-client] uploaded suppliers.csv")
+
+r = api.get("/api/clients", headers=FIRM)
+names = {c["name"] for c in r.json()}
+assert "NEW_CO" in names
+new_co = next(c for c in r.json() if c["name"] == "NEW_CO")
+assert new_co["suppliers"] == 1, new_co
+print(f"[add-client] NEW_CO now shows {new_co['suppliers']} supplier(s) in "
+      "the client list")
+
+# agent's own fetch helper (agent token, not firm token) sees the same list
+fetched = agent_mod.fetch_cloud_clients("http://testserver",
+                                        "dev-agent-token-change-me")
+# real HTTP needed for agent's helper (it uses plain httpx.get, not the
+# TestClient) — confirm the endpoint itself accepts the agent token via
+# the FastAPI test client directly instead:
+r = api.get("/api/clients", headers={"Authorization": "Bearer dev-agent-token-change-me"})
+assert r.status_code == 200, r.status_code
+print("[add-client] agent token can read the client list (any_auth)  OK")
+
+r = api.post("/api/clients", headers=FIRM, json={"name": "NEW_CO"})
+assert r.status_code == 409, r.status_code
+print("[add-client] duplicate name rejected  OK")
+
+r = api.post("/api/clients", headers=FIRM, json={"name": "bad name!"})
+assert r.status_code == 422, r.status_code
+print("[add-client] invalid characters rejected  OK")
+
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()
 print(f"[overview] queue: {ov['queue']}")
 assert ov["queue"] == {"review": 2, "approved": 0, "dispatched": 0,
                        "posted": 1, "failed": 0, "rejected": 1}
+
+# cleanup: remove the test client folder so repeated runs stay deterministic
+import shutil as _shutil
+_shutil.rmtree(ROOT / "client_data" / "NEW_CO", ignore_errors=True)
 
 print("\nALL CLOUD FLOW TESTS PASSED")

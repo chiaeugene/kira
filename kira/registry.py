@@ -7,11 +7,22 @@ dozens of these side by side.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .audit import AuditLog
 from .context import ClientContext, load_client_context
 from .rules import RuleStore
+
+CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+MASTER_FILES = ("chart_of_accounts.csv", "suppliers.csv", "customers.csv",
+                "tax_codes.csv")
+_MASTER_HEADERS = {
+    "chart_of_accounts.csv": "code,description,type\n",
+    "suppliers.csv": "code,name\n",
+    "customers.csv": "code,name\n",
+    "tax_codes.csv": "code,description,rate\n",
+}
 
 
 def list_clients(base: str | Path = "client_data") -> list[str]:
@@ -33,6 +44,44 @@ def open_client(name: str, base: str | Path = "client_data"
         RuleStore(d),
         AuditLog(d),
     )
+
+
+def create_client(name: str, base: str | Path = "client_data") -> Path:
+    """Register a new client: makes it appear in the console's client list
+    and in the Agent setup wizard's fetched list. Starts with empty master
+    files (correct headers) — upload real ones with save_masters(), or edit
+    later."""
+    name = name.strip()
+    if not CLIENT_NAME_RE.match(name):
+        raise ValueError(
+            "Client name may only contain letters, numbers, underscores and "
+            "hyphens (no spaces or symbols) — this name must also be typed "
+            "exactly into the Agent's config on the SQL PC.")
+    d = client_dir(name, base)
+    if d.exists():
+        raise FileExistsError(f"A client named '{name}' already exists.")
+    d.mkdir(parents=True)
+    for fname, header in _MASTER_HEADERS.items():
+        (d / fname).write_text(header, encoding="utf-8")
+    return d
+
+
+def save_masters(name: str, files: dict[str, bytes],
+                 base: str | Path = "client_data") -> list[str]:
+    """files: {filename: raw_csv_bytes} for any of MASTER_FILES. Overwrites
+    that file for the client. Returns the filenames actually saved."""
+    d = client_dir(name, base)
+    if not d.exists():
+        raise FileNotFoundError(
+            f"Client '{name}' does not exist — create it first.")
+    saved = []
+    for fname, content in files.items():
+        base_name = Path(fname).name  # defend against a path in the filename
+        if base_name not in MASTER_FILES:
+            continue
+        (d / base_name).write_bytes(content)
+        saved.append(base_name)
+    return saved
 
 
 def firm_overview(base: str | Path = "client_data") -> list[dict]:

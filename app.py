@@ -36,7 +36,8 @@ from kira.documents import extract_documents
 from kira.filelog import FileLog
 from kira.ingest import parse_workbook
 from kira.poster import PostedRegistry, SQLConfig, post_batch
-from kira.registry import client_dir, firm_overview, list_clients, open_client
+from kira.registry import (client_dir, create_client, firm_overview,
+                          list_clients, open_client, save_masters)
 from kira.repairs import apply_fixes, propose_fixes
 from kira.review import approve_batch, reject_batch
 from kira.validate import summarize, validate_batch
@@ -130,6 +131,50 @@ else:
 ui.sidebar_status(ai_on, posting_label, posting_state, n_sup, n_acc, n_rules)
 if REMOTE:
     st.sidebar.caption(f"Connected to {remote_url()}")
+
+with st.sidebar.expander("+ Add a new client"):
+    st.caption(
+        "This exact name must also be typed into the Agent's config on the "
+        "SQL PC — the Agent's setup wizard fetches this list, so you only "
+        "type it once."
+    )
+    new_name = st.text_input("Client name", key="new_client_name",
+                             placeholder="e.g. MAJU_JAYA")
+    st.caption("Master data (optional now — you can add these later):")
+    coa_up = st.file_uploader("Chart of accounts CSV", type=["csv"], key="nc_coa")
+    sup_up = st.file_uploader("Suppliers CSV", type=["csv"], key="nc_sup")
+    cus_up = st.file_uploader("Customers CSV", type=["csv"], key="nc_cus")
+    tax_up = st.file_uploader("Tax codes CSV", type=["csv"], key="nc_tax")
+
+    if st.button("Create client"):
+        name = new_name.strip()
+        if not name:
+            st.error("Enter a client name.")
+        else:
+            uploads_map = {
+                "chart_of_accounts.csv": coa_up, "suppliers.csv": sup_up,
+                "customers.csv": cus_up, "tax_codes.csv": tax_up,
+            }
+            files = {fname: f.getvalue() for fname, f in uploads_map.items()
+                     if f is not None}
+            try:
+                if REMOTE:
+                    res = api.create_client(name)
+                    if res.get("_conflict"):
+                        st.error(res.get("message", "Could not create client."))
+                    else:
+                        if files:
+                            api.upload_masters(name, files)
+                        st.success(f"Client '{name}' created.")
+                        st.rerun()
+                else:
+                    create_client(name)
+                    if files:
+                        save_masters(name, files)
+                    st.success(f"Client '{name}' created.")
+                    st.rerun()
+            except (ValueError, FileExistsError) as e:
+                st.error(str(e))
 
 n_inbox = (len(api.batches(state="review")) if REMOTE
            else len(batch_store.list(state="review")))

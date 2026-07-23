@@ -42,7 +42,8 @@ from kira.documents import MEDIA_TYPES, extract_documents, llm_available
 from kira.filelog import FileLog
 from kira.ingest import parse_workbook
 from kira.poster import PostedRegistry, _rows_to_invoices
-from kira.registry import client_dir, firm_overview, list_clients, open_client
+from kira.registry import (client_dir, create_client, firm_overview,
+                          list_clients, open_client, save_masters)
 from kira.repairs import propose_fixes
 from kira.review import approve_batch, reject_batch
 from kira.validate import validate_batch
@@ -76,6 +77,14 @@ def firm_auth(request: Request) -> None:
 def agent_auth(request: Request) -> None:
     if _token(request) != SRV.get("agent_token"):
         raise HTTPException(401, "invalid agent token")
+
+
+def any_auth(request: Request) -> None:
+    """Read-only endpoints the Agent's setup wizard also needs (e.g. the
+    client list) accept either token — creating/uploading stays firm-only."""
+    tok = _token(request)
+    if tok not in (SRV.get("firm_token"), SRV.get("agent_token")):
+        raise HTTPException(401, "invalid token")
 
 
 def _require_client(client: str) -> None:
@@ -313,14 +322,56 @@ def agents_status():
     return json.loads(AGENTS_STATUS.read_text(encoding="utf-8"))
 
 
-@app.get("/api/clients", dependencies=[Depends(firm_auth)])
+@app.get("/api/clients", dependencies=[Depends(any_auth)])
 def clients_list():
+    # any_auth: the Agent's setup wizard fetches this too, so a client's
+    # name only ever has to be typed once (at creation), never guessed
+    # again on the SQL PC.
     out = []
     for name in list_clients():
         ctx, rules, _a = open_client(name)
         out.append({"name": name, "suppliers": len(ctx.suppliers),
+                    "customers": len(ctx.customers),
                     "accounts": len(ctx.accounts), "rules": len(rules)})
     return out
+
+
+@app.post("/api/clients", dependencies=[Depends(firm_auth)])
+def create_client_endpoint(body: dict):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(422, "client name is required")
+    try:
+        create_client(name)
+    except FileExistsError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"name": name, "created": True}
+
+
+@app.post("/api/clients/{client}/masters", dependencies=[Depends(firm_auth)])
+async def upload_masters_endpoint(
+    client: str,
+    chart_of_accounts: UploadFile | None = None,
+    suppliers: UploadFile | None = None,
+    customers: UploadFile | None = None,
+    tax_codes: UploadFile | None = None,
+):
+    files: dict[str, bytes] = {}
+    for fname, upload in (
+        ("chart_of_accounts.csv", chart_of_accounts),
+        ("suppliers.csv", suppliers),
+        ("customers.csv", customers),
+        ("tax_codes.csv", tax_codes),
+    ):
+        if upload is not None:
+            files[fname] = await upload.read()
+    try:
+        saved = save_masters(client, files)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    return {"client": client, "saved": saved}
 
 
 def _json_records(df: pd.DataFrame) -> list[dict]:

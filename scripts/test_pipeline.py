@@ -200,4 +200,37 @@ assert rule_sale["account_code"] == "500-000"
 assert rule_pay["account_code"] == "310-001"
 print("[multi] doc_type-scoped rules learned (sale->500-000, payment->310-001)")
 
+# 10. Add-a-new-client registry functions (local mode path)
+from kira.registry import create_client, save_masters
+import shutil as _shutil
+_shutil.rmtree(ROOT / "client_data" / "TEST_NEW_CO", ignore_errors=True)
+
+d = create_client("TEST_NEW_CO")
+assert (d / "suppliers.csv").read_text(encoding="utf-8") == "code,name\n"
+print("[registry] create_client makes empty master files with headers")
+
+try:
+    create_client("TEST_NEW_CO")
+    raise AssertionError("expected FileExistsError")
+except FileExistsError:
+    print("[registry] duplicate client name rejected  OK")
+
+try:
+    create_client("bad name!")
+    raise AssertionError("expected ValueError")
+except ValueError:
+    print("[registry] invalid client name rejected  OK")
+
+saved = save_masters("TEST_NEW_CO", {
+    "suppliers.csv": b"code,name\n900-Z,Zeta Supplies\n",
+    "../evil.csv": b"code,name\nhack,hack\n",   # must be ignored, not written
+})
+assert saved == ["suppliers.csv"]
+assert not (ROOT / "client_data" / "evil.csv").exists()
+ctx2 = load_client_context("TEST_NEW_CO", ROOT / "client_data" / "TEST_NEW_CO")
+assert len(ctx2.suppliers) == 1 and ctx2.suppliers.iloc[0]["code"] == "900-Z"
+print("[registry] save_masters overwrites the right file, blocks path traversal")
+
+_shutil.rmtree(ROOT / "client_data" / "TEST_NEW_CO", ignore_errors=True)
+
 print("\nALL PIPELINE TESTS PASSED")

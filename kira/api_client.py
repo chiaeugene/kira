@@ -37,8 +37,11 @@ class KiraAPI:
 
     def _post(self, path: str, json: dict | None = None):
         r = self.http.post(path, json=json)
-        if r.status_code == 409:
-            return {"_conflict": True, **(r.json().get("detail") or {})}
+        if r.status_code in (409, 422):
+            detail = r.json().get("detail")
+            if isinstance(detail, dict):
+                return {"_conflict": True, **detail}
+            return {"_conflict": True, "message": detail}
         r.raise_for_status()
         return r.json()
 
@@ -48,6 +51,21 @@ class KiraAPI:
 
     def clients(self) -> list[dict]:
         return self._get("/api/clients")
+
+    def create_client(self, name: str) -> dict:
+        return self._post("/api/clients", {"name": name})
+
+    def upload_masters(self, client: str, files: dict[str, bytes]) -> dict:
+        """files: {"chart_of_accounts.csv": bytes, "suppliers.csv": bytes, ...}"""
+        field_map = {"chart_of_accounts.csv": "chart_of_accounts",
+                    "suppliers.csv": "suppliers",
+                    "customers.csv": "customers",
+                    "tax_codes.csv": "tax_codes"}
+        multipart = {field_map[f]: (f, content, "text/csv")
+                    for f, content in files.items() if f in field_map}
+        r = self.http.post(f"/api/clients/{client}/masters", files=multipart)
+        r.raise_for_status()
+        return r.json()
 
     def upload(self, client: str, files: list[tuple[str, bytes]]) -> dict:
         r = self.http.post(f"/api/clients/{client}/upload",
