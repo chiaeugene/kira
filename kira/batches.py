@@ -134,6 +134,20 @@ class BatchStore:
         self._save(batch)
         return batch
 
+    def purge_client(self, client: str) -> int:
+        """Remove every batch belonging to a client (all states). Used when
+        the client itself is deleted — orphan batches would otherwise sit in
+        the Inbox referencing a client that no longer exists."""
+        n = 0
+        for p in self.base.glob("b_*.json"):
+            try:
+                if json.loads(p.read_text(encoding="utf-8"))["client"] == client:
+                    p.unlink()
+                    n += 1
+            except Exception:
+                continue
+        return n
+
     def update_rows(self, batch_id: str, rows: pd.DataFrame,
                     issues: pd.DataFrame | None = None) -> dict:
         batch = self.get(batch_id)

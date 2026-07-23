@@ -402,7 +402,8 @@ def delete_client_endpoint(client: str):
         delete_client(client)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
-    return {"name": client, "deleted": True}
+    purged = store.purge_client(client)  # no orphan batches in the Inbox
+    return {"name": client, "deleted": True, "batches_purged": purged}
 
 
 @app.post("/api/clients/{client}/masters", dependencies=[Depends(firm_auth)])
@@ -426,6 +427,8 @@ async def upload_masters_endpoint(
         saved = save_masters(client, files)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
     return {"client": client, "saved": saved}
 
 

@@ -253,6 +253,10 @@ def _post_one(app, inv: dict) -> None:
         detail.Append()
         if doc_type == "journal":
             # debit the account, credit the contra (or vice versa if negative)
+            if not line["contra_account"]:
+                raise ValueError(
+                    "journal line has no contra_account — refusing to post "
+                    "an unbalanced entry (fix it in the console and re-approve)")
             amt = line["amount"]
             _set_first(detail, ("Account", "AccNo", "Code"), line["account_code"])
             _set_first(detail, ("Description",), line["description"])

@@ -82,7 +82,8 @@ batch_store = BatchStore() if not REMOTE else None
 EXCEL_EXT = {".xlsx", ".xls", ".csv"}
 DOC_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 EDITABLE = ["doc_type", "date", "supplier", "description", "amount", "tax",
-            "doc_no", "supplier_code", "account_code", "tax_code"]
+            "doc_no", "supplier_code", "account_code", "contra_account",
+            "tax_code"]
 DOC_TYPE_OPTIONS = ["purchase", "purchase_return", "sale", "sales_return",
                     "customer_payment", "supplier_payment", "journal"]
 
@@ -154,10 +155,10 @@ with st.sidebar.expander("+ Add a new client"):
     new_name = st.text_input("Client name", key="new_client_name",
                              placeholder="e.g. MAJU_JAYA")
     st.caption("Master data (optional now — you can add these later):")
-    coa_up = st.file_uploader("Chart of accounts CSV", type=["csv"], key="nc_coa")
-    sup_up = st.file_uploader("Suppliers CSV", type=["csv"], key="nc_sup")
-    cus_up = st.file_uploader("Customers CSV", type=["csv"], key="nc_cus")
-    tax_up = st.file_uploader("Tax codes CSV", type=["csv"], key="nc_tax")
+    coa_up = st.file_uploader("Chart of accounts (CSV or Excel)", type=["csv", "xlsx", "xls"], key="nc_coa")
+    sup_up = st.file_uploader("Suppliers (CSV or Excel)", type=["csv", "xlsx", "xls"], key="nc_sup")
+    cus_up = st.file_uploader("Customers (CSV or Excel)", type=["csv", "xlsx", "xls"], key="nc_cus")
+    tax_up = st.file_uploader("Tax codes (CSV or Excel)", type=["csv", "xlsx", "xls"], key="nc_tax")
 
     if st.button("Create client"):
         name = new_name.strip()
@@ -197,25 +198,28 @@ with st.sidebar.expander("Add masters"):
         "starts without them."
     )
     am_name = st.selectbox("Client", clients, key="am_client_name")
-    am_coa = st.file_uploader("Chart of accounts CSV", type=["csv"], key="am_coa")
-    am_sup = st.file_uploader("Suppliers CSV", type=["csv"], key="am_sup")
-    am_cus = st.file_uploader("Customers CSV", type=["csv"], key="am_cus")
-    am_tax = st.file_uploader("Tax codes CSV", type=["csv"], key="am_tax")
+    am_coa = st.file_uploader("Chart of accounts (CSV or Excel)", type=["csv", "xlsx", "xls"], key="am_coa")
+    am_sup = st.file_uploader("Suppliers (CSV or Excel)", type=["csv", "xlsx", "xls"], key="am_sup")
+    am_cus = st.file_uploader("Customers (CSV or Excel)", type=["csv", "xlsx", "xls"], key="am_cus")
+    am_tax = st.file_uploader("Tax codes (CSV or Excel)", type=["csv", "xlsx", "xls"], key="am_tax")
     if st.button("Upload masters", key="am_btn"):
         am_files = {fname: f.getvalue() for fname, f in {
             "chart_of_accounts.csv": am_coa, "suppliers.csv": am_sup,
             "customers.csv": am_cus, "tax_codes.csv": am_tax,
         }.items() if f is not None}
         if not am_files:
-            st.error("Choose at least one CSV first.")
+            st.error("Choose at least one file first.")
         else:
-            if REMOTE:
-                api.upload_masters(am_name, am_files)
-            else:
-                save_masters(am_name, am_files)
-            st.success(f"{len(am_files)} master file(s) saved for {am_name}. "
-                       "Open the batch in the Inbox and press "
-                       "'Re-code with AI'.")
+            try:
+                if REMOTE:
+                    api.upload_masters(am_name, am_files)
+                else:
+                    save_masters(am_name, am_files)
+                st.success(f"{len(am_files)} master file(s) saved for "
+                           f"{am_name}. Open the batch in the Inbox and "
+                           "press 'Re-code with AI'.")
+            except ValueError as e:
+                st.error(str(e))
 
 with st.sidebar.expander("Remove a client"):
     st.caption("Irreversible — deletes this client's master data, learned "
@@ -241,6 +245,7 @@ with st.sidebar.expander("Remove a client"):
                 else:
                     from kira.registry import delete_client as delete_client_local
                     delete_client_local(rm_name)
+                    batch_store.purge_client(rm_name)
                     st.success(f"Removed '{rm_name}'.")
                     reset_client_workspace()
                     for k in ("client", "client_select"):
@@ -283,6 +288,11 @@ def review_editor(df: pd.DataFrame, key: str) -> pd.DataFrame:
                 help="Which SQL module this line posts into"),
             "supplier": st.column_config.TextColumn("party"),
             "supplier_code": st.column_config.TextColumn("party_code"),
+            "contra_account": st.column_config.TextColumn(
+                "contra_account",
+                help="Journal lines only: the balancing side of the double "
+                     "entry (often the bank/cash account). Blank for "
+                     "invoices and payments."),
         },
         width="stretch", num_rows="fixed", key=key,
     )
@@ -444,11 +454,16 @@ with tab_batch:
                 st.rerun()
         elif left.button("Approve batch", type="primary"):
             approved = apply_edits(df, edited)
-            missing = approved[(approved["supplier_code"] == "")
-                               | (approved["account_code"] == "")]
+            _isj = approved["doc_type"].fillna("").astype(str) == "journal"
+            _contra = (approved["contra_account"].fillna("").astype(str).str.strip()
+                       if "contra_account" in approved.columns
+                       else pd.Series("", index=approved.index))
+            missing = approved[(~_isj & (approved["supplier_code"] == ""))
+                               | (approved["account_code"] == "")
+                               | (_isj & (_contra == ""))]
             if not missing.empty:
-                st.error(f"{len(missing)} line(s) still missing supplier or "
-                         f"account codes (rows: {list(missing['source_row'])}).")
+                st.error(f"{len(missing)} line(s) still missing party, account "
+                         f"or contra codes (rows: {list(missing['source_row'])}).")
             else:
                 src = [u.name for u in uploads] if uploads else ["console"]
                 if MODE == "cloud":

@@ -47,12 +47,13 @@ SCHEMA = {
                     "doc_type": {"type": "string", "enum": DOC_TYPES},
                     "party_code": {"type": "string"},
                     "account_code": {"type": "string"},
+                    "contra_account": {"type": "string"},
                     "tax_code": {"type": "string"},
                     "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["row_id", "doc_type", "party_code", "account_code",
-                             "tax_code", "confidence", "reason"],
+                             "contra_account", "tax_code", "confidence", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -85,10 +86,16 @@ records into SQL Accounting. For each transaction line decide:
    BANK or CASH account for payments (which account the money moved through);
    the adjustment account for journals.
 
-4. tax_code — from the client's tax code list ("" if none applies).
+4. contra_account — ONLY for journal lines: the balancing side of the double
+   entry, from the chart of accounts (daily takings/cash sales usually debit
+   a BANK or CASH account and credit an income account, so account_code =
+   income account and contra_account = bank/cash, or vice versa as the sheet
+   implies). "" for every non-journal line.
 
-5. confidence: high (certain) / medium (plausible) / low (needs human review).
-6. reason: one short sentence.
+5. tax_code — from the client's tax code list ("" if none applies).
+
+6. confidence: high (certain) / medium (plausible) / low (needs human review).
+7. reason: one short sentence.
 
 Descriptions may be in English, Malay, or Chinese. Never invent codes. When
 unsure of doc_type, prefer the hint; if there is no hint, mark confidence low."""
@@ -150,8 +157,8 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
     out = df.copy().reset_index(drop=True)
     if "doc_type_hint" not in out.columns:
         out["doc_type_hint"] = ""
-    for col in ("doc_type", "supplier_code", "account_code", "tax_code",
-                "confidence", "source", "reason"):
+    for col in ("doc_type", "supplier_code", "account_code", "contra_account",
+                "tax_code", "confidence", "source", "reason"):
         out[col] = ""
 
     # Pass 1 — learned rules (need a known doc_type to pick the rule space)
@@ -193,8 +200,9 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
                     continue
                 i = r["row_id"]
                 out.loc[i, ["doc_type", "supplier_code", "account_code",
-                            "tax_code"]] = [res["doc_type"], res["party_code"],
-                                            res["account_code"], res["tax_code"]]
+                            "contra_account", "tax_code"]] = [
+                    res["doc_type"], res["party_code"], res["account_code"],
+                    res.get("contra_account", ""), res["tax_code"]]
                 out.loc[i, ["confidence", "source", "reason"]] = [
                     res["confidence"], "llm", res["reason"]]
         return out

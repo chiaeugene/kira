@@ -103,6 +103,15 @@ def propose_fixes(rows: pd.DataFrame, issues: pd.DataFrame,
                 add(rid, sr, code, "account_code", row["account_code"], m[0],
                     f"Code not in the chart of accounts; closest is {m[0]}.")
 
+        elif code == "JOURNAL_NO_CONTRA":
+            money = ctx.money_accounts()
+            if not money.empty:
+                m_code = str(money.iloc[0]["code"])
+                m_desc = str(money.iloc[0].get("description", ""))
+                add(rid, sr, code, "contra_account", "", m_code,
+                    f"Journal needs a balancing side — defaulted to {m_code} "
+                    f"{m_desc} (change it if the money moved elsewhere).")
+
         elif code == "UNKNOWN_TAX" and taxes:
             m = _best_match(str(row["tax_code"]), taxes, floor=0.5)
             if m:
@@ -148,6 +157,8 @@ def propose_fixes(rows: pd.DataFrame, issues: pd.DataFrame,
 
     # blanks (no issue row, but the batch can't post without codes)
     for rid, row in by_rid.items():
+        if str(row.get("doc_type", "")) == "journal":
+            continue  # journals have no party — nothing to propose
         if str(row.get("supplier_code", "")).strip() == "":
             master = party_master_for(row)
             if not master:

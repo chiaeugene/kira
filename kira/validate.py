@@ -128,6 +128,18 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
                 add(SEV_ERROR, "UNKNOWN_SUPPLIER",
                     f"Supplier code '{s_code}' is not in the master.")
 
+        # --- journals need BOTH sides of the double entry ---
+        if dtp == "journal":
+            contra = str(row.get("contra_account", "") or "").strip()
+            if not contra:
+                add(SEV_ERROR, "JOURNAL_NO_CONTRA",
+                    "Journal line has no contra account — the other side of "
+                    "the double entry (often the bank/cash account).")
+            elif account_codes and contra not in account_codes:
+                add(SEV_ERROR, "UNKNOWN_ACCOUNT",
+                    f"Contra account '{contra}' is not in the chart of "
+                    "accounts.")
+
         # --- account checks: exists + is the right KIND for the doc type ---
         if a_code and account_codes and a_code not in account_codes:
             add(SEV_ERROR, "UNKNOWN_ACCOUNT",

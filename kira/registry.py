@@ -14,7 +14,8 @@ import time
 from pathlib import Path
 
 from .audit import AuditLog
-from .context import ClientContext, load_client_context
+from .context import (ClientContext, load_client_context,
+                      parse_master_upload)
 from .rules import RuleStore
 
 CLIENT_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
@@ -121,7 +122,11 @@ def save_masters(name: str, files: dict[str, bytes],
         base_name = Path(fname).name  # defend against a path in the filename
         if base_name not in MASTER_FILES:
             continue
-        (d / base_name).write_bytes(content)
+        # Validate + normalize NOW (accepts CSV or Excel, recognizes SQL
+        # Accounting's own header names) — a bad file is refused with a clear
+        # message instead of silently breaking the client's coding later.
+        df = parse_master_upload(base_name, content)
+        df.to_csv(d / base_name, index=False)
         saved.append(base_name)
     return saved
 

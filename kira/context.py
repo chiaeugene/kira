@@ -62,14 +62,92 @@ class ClientContext:
         return buf.getvalue()
 
 
+# Real-world SQL Accounting exports name their columns all sorts of ways
+# ("ACC. CODE", "Company Name", Malay headers...). Map them to ours instead
+# of demanding an exact match — a mis-headed masters file must never take
+# a client (or the whole console) down.
+_HEADER_ALIASES: dict[str, list[str]] = {
+    "code": ["code", "acc code", "acc. code", "acc.code", "account code",
+             "account no", "account no.", "accno", "acc no", "gl code",
+             "tax code", "supplier code", "customer code", "company code",
+             "creditor code", "debtor code", "kod", "kod akaun"],
+    "description": ["description", "desc", "account description",
+                    "account name", "descriptions", "keterangan", "name"],
+    "type": ["type", "acc type", "account type", "special type",
+             "special account type", "category", "jenis"],
+    "name": ["name", "company name", "supplier name", "customer name",
+             "creditor name", "debtor name", "attention", "nama",
+             "nama syarikat", "description"],
+    "rate": ["rate", "tax rate", "rate %", "rate (%)", "percent", "%",
+             "kadar", "kadar cukai"],
+}
+
+MASTER_COLUMNS: dict[str, tuple[list[str], list[str]]] = {
+    # filename -> (required columns, optional columns)
+    "chart_of_accounts.csv": (["code", "description"], ["type"]),
+    "suppliers.csv": (["code", "name"], []),
+    "customers.csv": (["code", "name"], []),
+    "tax_codes.csv": (["code", "description"], ["rate"]),
+}
+
+
+def _normalize_headers(df: pd.DataFrame, required: list[str],
+                       optional: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """Rename recognizable header variants to our names.
+    Returns (df, still_missing_required)."""
+    df = df.copy()
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    for target in required + optional:
+        if target in df.columns:
+            continue
+        for alias in _HEADER_ALIASES.get(target, []):
+            if alias in df.columns and alias not in required + optional:
+                df = df.rename(columns={alias: target})
+                break
+    for target in optional:
+        if target not in df.columns:
+            df[target] = ""
+    return df, [c for c in required if c not in df.columns]
+
+
+def parse_master_upload(fname: str, content: bytes) -> pd.DataFrame:
+    """Parse + normalize an uploaded master file (CSV or Excel export from
+    SQL Accounting). Raises ValueError with a human-fixable message if the
+    required columns cannot be recognized — checked at UPLOAD time, so a bad
+    file is refused up front instead of breaking the client later."""
+    required, optional = MASTER_COLUMNS[fname]
+    try:
+        if content[:4] == b"PK\x03\x04" or content[:4] == b"\xd0\xcf\x11\xe0":
+            df = pd.read_excel(io.BytesIO(content), dtype=str).fillna("")
+        else:
+            df = pd.read_csv(io.BytesIO(content), dtype=str).fillna("")
+    except Exception as e:
+        raise ValueError(f"{fname}: could not read the file ({e}). Export it "
+                         "from SQL Accounting as CSV or Excel.")
+    df, missing = _normalize_headers(df, required, optional)
+    if missing:
+        raise ValueError(
+            f"{fname}: could not find column(s) {missing} — the file has "
+            f"{list(df.columns)}. Expected headers like "
+            f"{', '.join(required + optional)} (SQL Accounting's own export "
+            "headers are recognized too).")
+    df = df[required + optional].astype(str)
+    df = df[df[required[0]].str.strip() != ""].reset_index(drop=True)
+    return df
+
+
 def _read_csv(path: Path, required: list[str]) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=required)
-    df = pd.read_csv(path, dtype=str).fillna("")
-    df.columns = [c.strip().lower() for c in df.columns]
-    missing = [c for c in required if c not in df.columns]
+    try:
+        df = pd.read_csv(path, dtype=str).fillna("")
+    except Exception:
+        # A corrupt master file degrades to "no masters" — the console keeps
+        # working (AI just can't code against it) instead of erroring out.
+        return pd.DataFrame(columns=required)
+    df, missing = _normalize_headers(df, required, [])
     if missing:
-        raise ValueError(f"{path.name} is missing columns: {missing}")
+        return pd.DataFrame(columns=required)
     return df
 
 

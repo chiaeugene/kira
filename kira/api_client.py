@@ -71,6 +71,8 @@ class KiraAPI:
         multipart = {field_map[f]: (f, content, "text/csv")
                     for f, content in files.items() if f in field_map}
         r = self.http.post(f"/api/clients/{client}/masters", files=multipart)
+        if r.status_code == 422:  # unreadable file / unrecognized headers
+            raise ValueError(r.json().get("detail", "master file rejected"))
         r.raise_for_status()
         return r.json()
 

@@ -28,7 +28,18 @@ def approve_batch(store: BatchStore, batch: dict,
 
     issues = validate_batch(rows, ctx, registry.keys)
     counts = summarize(issues)
-    blank = rows[(rows["supplier_code"] == "") | (rows["account_code"] == "")]
+    # Journal entries have no supplier/customer by nature — demanding a party
+    # code on them made journal batches impossible to approve (field bug).
+    # They need the contra side of the double entry instead.
+    dtp = (rows["doc_type"].fillna("").astype(str)
+           if "doc_type" in rows.columns else pd.Series("", index=rows.index))
+    is_journal = dtp == "journal"
+    contra = (rows["contra_account"].fillna("").astype(str).str.strip()
+              if "contra_account" in rows.columns
+              else pd.Series("", index=rows.index))
+    blank = rows[(~is_journal & (rows["supplier_code"] == ""))
+                 | (rows["account_code"] == "")
+                 | (is_journal & (contra == ""))]
     if counts["error"] > 0 or not blank.empty:
         return False, {
             "message": "batch not clean — fix and re-approve",
@@ -52,8 +63,9 @@ def approve_batch(store: BatchStore, batch: dict,
                     audit.log_correction(int(r["source_row"]), str(r["supplier"]),
                                          f, o.get(f, ""), r[f],
                                          str(r.get("source", "")))
-        rules.learn(r["supplier"], r["supplier_code"], r["account_code"],
-                    r["tax_code"], str(r.get("doc_type", "") or "purchase"))
+        if str(r["supplier"]).strip():  # partyless journals: nothing to key on
+            rules.learn(r["supplier"], r["supplier_code"], r["account_code"],
+                        r["tax_code"], str(r.get("doc_type", "") or "purchase"))
     rules.save()
 
     store.update_rows(batch["id"], rows)
