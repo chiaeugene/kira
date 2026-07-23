@@ -91,6 +91,12 @@ class KiraAPI:
     def repairs(self, bid: str) -> list[dict]:
         return self._get(f"/api/batches/{bid}/repairs")
 
+    def recode(self, bid: str) -> dict:
+        """Re-run AI coding on a review batch with the client's current
+        masters (used after uploading a chart of accounts that didn't exist
+        when the batch first arrived)."""
+        return self._post(f"/api/batches/{bid}/recode", {})
+
     def approve(self, bid: str, rows: list[dict]) -> dict:
         return self._post(f"/api/batches/{bid}/approve", {"rows": rows})
 

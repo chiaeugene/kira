@@ -78,6 +78,17 @@ r = api.post(f"/api/batches/{bid}/approve", headers=FIRM,
 assert r.status_code == 409
 print(f"[approve] dirty refused: blank_codes={r.json()['detail']['blank_codes']}  OK")
 
+# 2b. recode: re-runs coding with current masters, keeps batch in review
+r = api.post(f"/api/batches/{bid}/recode", headers=FIRM)
+assert r.status_code == 200 and r.json()["state"] == "review"
+recoded = api.get(f"/api/batches/{bid}", headers=FIRM).json()
+assert len(recoded["rows"]) == 11
+assert {row["row_id"] for row in recoded["rows"]} == \
+       {row["row_id"] for row in detail["rows"]}, "row_ids must survive recode"
+n_filled = sum(1 for row in recoded["rows"] if row["supplier_code"])
+print(f"[recode] batch re-coded in place: {n_filled}/11 parties matched  OK")
+detail = recoded
+
 # 3. code + approve
 coding = {
     "Ampang Hardware": ("300-A001", "610-000", "NR"),

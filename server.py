@@ -229,6 +229,29 @@ def approve(bid: str, body: dict):
     return _summary(info["batch"])
 
 
+@app.post("/api/batches/{bid}/recode", dependencies=[Depends(firm_auth)])
+def recode(bid: str):
+    """Re-run AI coding on a review batch with the client's CURRENT masters.
+
+    The escape hatch for the field dead-end: a client registered by the
+    Agent starts with empty masters, so its first batches arrive with blank
+    account codes and can never be approved. Upload the chart of accounts /
+    suppliers / customers, press Re-code, and the same batch is coded again
+    properly - no re-upload of the source file needed."""
+    b = store.get(bid)
+    if b is None:
+        raise HTTPException(404, "no such batch")
+    if b["state"] != "review":
+        raise HTTPException(409, f"batch is {b['state']}, not review")
+    ctx, rules, _audit = open_client(b["client"])
+    registry = PostedRegistry(client_dir(b["client"]))
+    coded = classify(records_to_df(b["rows"]), ctx, rules, model=LLM["model"],
+                     batch_size=LLM["batch_size"], max_tokens=LLM["max_tokens"])
+    issues = validate_batch(coded, ctx, registry.keys)
+    b = store.update_rows(bid, coded, issues)
+    return _summary(b)
+
+
 @app.get("/api/batches/{bid}/repairs", dependencies=[Depends(firm_auth)])
 def batch_repairs(bid: str):
     """Suggested fixes for the batch's validation issues."""

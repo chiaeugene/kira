@@ -189,6 +189,34 @@ with st.sidebar.expander("+ Add a new client"):
             except (ValueError, FileExistsError) as e:
                 st.error(str(e))
 
+with st.sidebar.expander("Add masters"):
+    st.caption(
+        "Give an existing client its SQL master data — chart of accounts, "
+        "suppliers, customers, tax codes (CSV exports from SQL Accounting). "
+        "Kira codes lines against these; a client registered from the Agent "
+        "starts without them."
+    )
+    am_name = st.selectbox("Client", clients, key="am_client_name")
+    am_coa = st.file_uploader("Chart of accounts CSV", type=["csv"], key="am_coa")
+    am_sup = st.file_uploader("Suppliers CSV", type=["csv"], key="am_sup")
+    am_cus = st.file_uploader("Customers CSV", type=["csv"], key="am_cus")
+    am_tax = st.file_uploader("Tax codes CSV", type=["csv"], key="am_tax")
+    if st.button("Upload masters", key="am_btn"):
+        am_files = {fname: f.getvalue() for fname, f in {
+            "chart_of_accounts.csv": am_coa, "suppliers.csv": am_sup,
+            "customers.csv": am_cus, "tax_codes.csv": am_tax,
+        }.items() if f is not None}
+        if not am_files:
+            st.error("Choose at least one CSV first.")
+        else:
+            if REMOTE:
+                api.upload_masters(am_name, am_files)
+            else:
+                save_masters(am_name, am_files)
+            st.success(f"{len(am_files)} master file(s) saved for {am_name}. "
+                       "Open the batch in the Inbox and press "
+                       "'Re-code with AI'.")
+
 with st.sidebar.expander("Remove a client"):
     st.caption("Irreversible — deletes this client's master data, learned "
               "rules, and audit trail.")
@@ -487,6 +515,47 @@ with tab_inbox:
         for n in b.get("notes", []):
             note_widget(n)
 
+        # A client registered by the Agent starts with EMPTY masters — the AI
+        # has no chart of accounts to code against, so every line arrives with
+        # a blank account code and approval would dead-end. Say so up front,
+        # and offer a re-code once the masters exist (field feedback).
+        if REMOTE:
+            _cl = next((c for c in api.clients()
+                        if c["name"] == b["client"]), None)
+            _n_accounts = _cl.get("accounts", 0) if _cl else 0
+        else:
+            _bctx, _x, _y = open_client(b["client"])
+            _n_accounts = len(_bctx.accounts)
+        _blank_now = sum(1 for rec in b["rows"]
+                        if not str(rec.get("account_code", "") or "").strip())
+        if _n_accounts == 0:
+            st.warning(
+                f"**{b['client']} has no chart of accounts yet**, so Kira "
+                "cannot assign account codes — approval will be blocked "
+                "until every line has one. Fix: open the sidebar, use "
+                "**Add masters** to upload this client's chart of accounts "
+                "(plus suppliers / customers / tax codes), then press "
+                "**Re-code with AI** below. Or type the codes into the "
+                "account_code column by hand."
+            )
+        if _blank_now and st.button(
+                f"Re-code with AI ({_blank_now} blank line(s))",
+                key=f"rc_{bid}",
+                help="Runs AI coding again on this batch using the client's "
+                     "current master data — use after uploading masters."):
+            with st.spinner("Re-coding this batch..."):
+                if REMOTE:
+                    api.recode(bid)
+                else:
+                    _ctx2, _rules2, _a2 = open_client(b["client"])
+                    _reg2 = PostedRegistry(client_dir(b["client"]))
+                    _coded2 = classify(records_to_df(b["rows"]), _ctx2, _rules2)
+                    _iss2 = validate_batch(_coded2, _ctx2, _reg2.keys)
+                    batch_store.update_rows(bid, _coded2, _iss2)
+            st.session_state.pop(f"rows_{bid}", None)
+            st.session_state.pop(f"editor_{bid}", None)
+            st.rerun()
+
         rows_key = f"rows_{bid}"
         rows_df = st.session_state.get(rows_key)
         if rows_df is None:
@@ -517,6 +586,14 @@ with tab_inbox:
                 if res.get("_conflict"):
                     st.error(f"{res.get('message')} — {res.get('errors')} "
                              f"error(s), {res.get('blank_codes')} blank code(s).")
+                    if res.get("blank_codes"):
+                        st.info(
+                            "Blank codes mean Kira had nothing to code these "
+                            "lines to. Upload this client's master data in "
+                            "the sidebar (**Add masters**), press **Re-code "
+                            "with AI** above, then approve again — or fill "
+                            "the party_code / account_code columns by hand."
+                        )
                     st.dataframe(pd.DataFrame(res.get("issues", [])),
                                  width="stretch", hide_index=True)
                 else:
@@ -533,6 +610,14 @@ with tab_inbox:
                 else:
                     st.error(f"{info['message']} — {info['errors']} error(s), "
                              f"{info['blank_codes']} line(s) missing codes.")
+                    if info.get("blank_codes"):
+                        st.info(
+                            "Blank codes mean Kira had nothing to code these "
+                            "lines to. Upload this client's master data in "
+                            "the sidebar (**Add masters**), press **Re-code "
+                            "with AI** above, then approve again — or fill "
+                            "the party_code / account_code columns by hand."
+                        )
                     st.dataframe(pd.DataFrame(info["issues"]),
                                  width="stretch", hide_index=True)
         if r.button("Reject", key=f"rj_{bid}"):

@@ -134,11 +134,14 @@ class BatchStore:
         self._save(batch)
         return batch
 
-    def update_rows(self, batch_id: str, rows: pd.DataFrame) -> dict:
+    def update_rows(self, batch_id: str, rows: pd.DataFrame,
+                    issues: pd.DataFrame | None = None) -> dict:
         batch = self.get(batch_id)
         if batch is None:
             raise KeyError(batch_id)
         batch["rows"] = rows_to_records(rows)
         batch["total_rm"] = round(float(rows["amount"].sum()), 2)
+        if issues is not None:
+            batch["issues"] = issues.to_dict(orient="records")
         self._save(batch)
         return batch
