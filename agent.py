@@ -451,11 +451,43 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
     return True
 
 
+def dump_fields_cli(cfg: dict) -> int:
+    """Go-live prerequisite: print the REAL SQL Accounting field names for
+    every posting module, for every configured company. Read-only — creates
+    an in-memory document to inspect (BizObject.New()) and never saves it,
+    so this is always safe to run against a live company, including a live
+    business's real data. Confirms (or corrects) the field-name guesses in
+    kira/poster.py's _post_one before dry_run is ever switched off."""
+    from kira.poster import SQLConfig, dump_fields
+    for name, ccfg in cfg["clients"].items():
+        print(f"\n{'=' * 60}\n{name} -> {ccfg.get('fdb_name', '?')}\n{'=' * 60}")
+        sql_cfg = SQLConfig(**{k: ccfg.get(k, "") for k in
+                               ("user", "password", "dcf_path", "fdb_name")})
+        try:
+            result = dump_fields(sql_cfg)
+        except Exception as e:
+            print(f"  Could not connect: {e}")
+            continue
+        for sql_doc, datasets in result.items():
+            print(f"\n  {sql_doc}:")
+            for ds_name, fields in datasets.items():
+                print(f"    {ds_name}: {', '.join(fields)}")
+    print(f"\nDone. Compare these field names against the candidates tried "
+         f"in kira/poster.py's _post_one() / _set_first() calls — if a "
+         "module you plan to post to is missing a field it expects, add "
+         "the real name there before switching dry_run off for it.")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--setup", action="store_true",
                     help="run the interactive setup wizard")
+    ap.add_argument("--dump-fields", action="store_true",
+                    help="read-only: print SQL Accounting's real field names "
+                         "for every posting module (go-live prerequisite, "
+                         "never writes anything)")
     ap.add_argument("--config", default=str(BASE_DIR / "agent_config.yaml"))
     args = ap.parse_args()
 
@@ -486,6 +518,9 @@ def main() -> int:
                 input("Press Enter to close...")
             return 2
         cfg = load_cfg(args.config)
+
+    if args.dump_fields:
+        return dump_fields_cli(cfg)
 
     banner(cfg)
 

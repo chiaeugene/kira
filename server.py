@@ -104,7 +104,8 @@ def _map_sender(map_file: str, key: str, channel: str) -> str:
 
 
 async def _ingest_uploads(client: str, files: list[UploadFile],
-                          channel: str) -> tuple[pd.DataFrame, list[str]]:
+                          channel: str, force: bool = False
+                          ) -> tuple[pd.DataFrame, list[str]]:
     filelog = FileLog(client_dir(client))
     frames, notes, docs = [], [], []
     for f in files:
@@ -112,11 +113,16 @@ async def _ingest_uploads(client: str, files: list[UploadFile],
         data = await f.read()
 
         prior = filelog.seen(data)
-        if prior:
+        if prior and not force:
             notes.append(f"{f.filename}: DUPLICATE FILE — identical content "
                          f"already received as '{prior['file']}' on {prior['ts']} "
-                         f"via {prior['channel']}. Skipped.")
+                         f"via {prior['channel']}. Skipped (tick 'Re-ingest "
+                         "anyway' to process it again — e.g. after an "
+                         "improved parser).")
             continue
+        if prior and force:
+            notes.append(f"{f.filename}: re-ingested despite matching '{prior['file']}' "
+                         f"from {prior['ts']} — forced.")
 
         if ext in EXCEL_EXT:
             with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -177,9 +183,9 @@ def _summary(batch: dict) -> dict:
 # ------------------------------- intake -------------------------------
 
 @app.post("/api/clients/{client}/upload", dependencies=[Depends(firm_auth)])
-async def upload(client: str, files: list[UploadFile]):
+async def upload(client: str, files: list[UploadFile], force: bool = False):
     _require_client(client)
-    raw, notes = await _ingest_uploads(client, files, "upload")
+    raw, notes = await _ingest_uploads(client, files, "upload", force=force)
     batch = _code_and_batch(client, raw, notes, [f.filename for f in files])
     return _summary(batch)
 

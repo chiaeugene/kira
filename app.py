@@ -339,6 +339,13 @@ with tab_batch:
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
+    force_reingest = st.checkbox(
+        "Re-ingest anyway (this exact file was already sent before)",
+        key="force_reingest",
+        help="Kira normally refuses a byte-identical re-upload to guard "
+             "against accidental double entry. Tick this to process it "
+             "again anyway — e.g. after Kira's parsing has improved, or "
+             "you rejected the earlier batch and want a clean retry.")
     if show_hero:
         ui.features()
 
@@ -346,7 +353,8 @@ with tab_batch:
     if REMOTE and uploads and "upload_result" not in st.session_state:
         with st.spinner("Uploading — Kira Cloud is reading and coding…"):
             result = api.upload(client_name,
-                                [(u.name, bytes(u.getbuffer())) for u in uploads])
+                                [(u.name, bytes(u.getbuffer())) for u in uploads],
+                                force=force_reingest)
         st.session_state.upload_result = result
 
     if REMOTE and "upload_result" in st.session_state:
@@ -376,11 +384,15 @@ with tab_batch:
                 ext = Path(u.name).suffix.lower()
                 data = bytes(u.getbuffer())
                 prior = filelog.seen(data)
-                if prior:
+                if prior and not force_reingest:
                     notes.append(f"{u.name}: DUPLICATE FILE — identical content "
                                  f"already received as '{prior['file']}' on "
-                                 f"{prior['ts']}. Skipped.")
+                                 f"{prior['ts']}. Skipped (tick 'Re-ingest "
+                                 "anyway' above to process it again).")
                     continue
+                if prior and force_reingest:
+                    notes.append(f"{u.name}: re-ingested despite matching "
+                                 f"'{prior['file']}' from {prior['ts']} — forced.")
                 if ext in EXCEL_EXT:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
                         tmp.write(data)

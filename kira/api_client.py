@@ -76,8 +76,10 @@ class KiraAPI:
         r.raise_for_status()
         return r.json()
 
-    def upload(self, client: str, files: list[tuple[str, bytes]]) -> dict:
+    def upload(self, client: str, files: list[tuple[str, bytes]],
+              force: bool = False) -> dict:
         r = self.http.post(f"/api/clients/{client}/upload",
+                           params={"force": force} if force else None,
                            files=[("files", (n, d)) for n, d in files])
         if r.status_code == 422:
             return {"_unparseable": True, **(r.json().get("detail") or {})}

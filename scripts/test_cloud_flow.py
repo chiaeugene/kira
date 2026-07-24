@@ -139,6 +139,18 @@ dup = upload(variant("v1")).json()
 assert dup["errors"] >= 11, dup
 print(f"[dedup-lines] re-exported file flags {dup['errors']} DUP_POSTED errors  OK")
 
+# 6b. force=True bypasses the file-hash guard for an intentional re-ingest
+# (e.g. after a parser improvement) - the ORIGINAL byte-identical file,
+# refused at check 5, now goes through.
+with SAMPLE.open("rb") as f:
+    r = api.post("/api/clients/DEMO_CLIENT/upload", headers=FIRM,
+                 params={"force": True},
+                 files=[("files", (SAMPLE.name, f, "application/octet-stream"))])
+assert r.status_code == 200, r.text
+forced = r.json()
+assert forced["lines"] == 11, forced
+print("[force-reingest] byte-identical file re-processed when force=True  OK")
+
 # 7. Telegram + WhatsApp intake webhooks map sender -> client
 v2 = variant("v2")
 with v2.open("rb") as f:
@@ -303,7 +315,7 @@ print("[wizard] _slugify produces valid client-name strings")
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()
 print(f"[overview] queue: {ov['queue']}")
-assert ov["queue"] == {"review": 2, "approved": 0, "dispatched": 0,
+assert ov["queue"] == {"review": 3, "approved": 0, "dispatched": 0,
                        "posted": 1, "failed": 0, "rejected": 1}
 
 # cleanup: remove the test client folder so repeated runs stay deterministic
