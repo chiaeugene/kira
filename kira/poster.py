@@ -229,7 +229,11 @@ def _post_one(app, inv: dict) -> None:
         _set_first(main, ("PostDate",), inv["doc_date"], kind="date")
     except RuntimeError:
         pass
-    if inv["doc_no"]:
+    # Journals: doc_no here is our own internal grouping key (e.g. the
+    # synthetic TAKINGS-YYYYMMDD tag a daily-takings sheet gets split under),
+    # never a real journal voucher number — SQL auto-numbers these instead,
+    # matching how an accountant's manually-keyed entries already look.
+    if inv["doc_no"] and doc_type != "journal":
         try:
             _set_first(main, ("DocNo",), inv["doc_no"])
         except RuntimeError:

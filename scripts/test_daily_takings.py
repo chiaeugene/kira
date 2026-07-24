@@ -157,4 +157,120 @@ unbalanced_lines[0]["amount"] += 50.0
 assert _would_refuse(unbalanced_lines), "unbalanced day MUST be refused at post time"
 print("[poster] balance guard: clean day posts, tampered day is refused  OK")
 
+# --- 5. journals let SQL auto-number (never write our internal grouping key
+#     into SQL's DocNo) - confirmed against the REAL field names dump_fields
+#     returned from The Voice Karaoke's SQL Accounting (2026-07-25): GL_JE's
+#     detail line uses CODE (not ACCOUNT) for the account, and DR/CR exist
+#     exactly as named. Mocked here since real SQL Accounting isn't
+#     available in this environment.
+from kira.poster import _post_one
+
+
+class _FakeField:
+    def __init__(self):
+        self.value = None
+
+    @property
+    def AsString(self):
+        return self.value
+
+    @AsString.setter
+    def AsString(self, v):
+        self.value = v
+
+    AsFloat = AsString
+    AsDateTime = AsString
+
+
+class _FakeDataSet:
+    REAL_FIELDS = {"DOCDATE", "POSTDATE", "DOCNO", "CODE", "DESCRIPTION",
+                   "DR", "CR"}  # GL_JE, per the live dump_fields output
+
+    def __init__(self):
+        self.queried: list[str] = []
+
+    def FindField(self, name):
+        self.queried.append(name.upper())
+        if name.upper() not in self.REAL_FIELDS:
+            raise Exception(f"field {name} not found")
+        return _FakeField()
+
+    def Append(self):
+        pass
+
+    def Post(self):
+        pass
+
+
+class _FakeDataSets:
+    def __init__(self, main, detail):
+        self.main, self.detail = main, detail
+
+    def Find(self, name):
+        return self.main if name == "MainDataSet" else self.detail
+
+
+class _FakeBiz:
+    def __init__(self):
+        self.main = _FakeDataSet()
+        self.detail = _FakeDataSet()
+        self.DataSets = _FakeDataSets(self.main, self.detail)
+
+    def New(self):
+        pass
+
+    def Save(self):
+        pass
+
+
+class _FakeBizObjects:
+    def __init__(self, biz):
+        self._biz = biz
+
+    def Find(self, name):
+        return self._biz
+
+
+class _FakeApp:
+    def __init__(self, biz):
+        self.BizObjects = _FakeBizObjects(biz)
+
+
+biz = _FakeBiz()
+app = _FakeApp(biz)
+journal_inv = {
+    "doc_type": "journal", "sql_doc": "GL_JE", "supplier_code": "",
+    "doc_date": "2026-07-01", "doc_no": "TAKINGS-20260701",
+    "lines": [{"account_code": "500-000", "description": "BEVERAGES & FOOD",
+              "amount": -147.2, "tax_code": "", "contra_account": ""},
+             {"account_code": "310-000", "description": "CASH SALES",
+              "amount": 147.2, "tax_code": "", "contra_account": ""}],
+}
+_post_one(app, journal_inv)
+assert "DOCNO" not in biz.main.queried, \
+    f"journal must NOT write its internal grouping key to SQL's DocNo, queried={biz.main.queried}"
+assert "CODE" in biz.detail.queried, "journal detail account must use CODE (confirmed field name)"
+assert "DR" in biz.detail.queried or "CR" in biz.detail.queried
+print("[poster] journal never writes its internal doc_no to SQL - "
+     "auto-numbering left in charge  OK")
+
+# Non-journal (e.g. purchase) DOES write a real doc_no when the source file
+# actually had one.
+biz2 = _FakeBiz()
+app2 = _FakeApp(biz2)
+purchase_inv = {
+    "doc_type": "purchase", "sql_doc": "PH_PI", "supplier_code": "S001",
+    "doc_date": "2026-07-01", "doc_no": "INV-12345",
+    "lines": [{"account_code": "600-000", "description": "stock",
+              "amount": 100.0, "tax_code": ""}],
+}
+try:
+    _post_one(app2, purchase_inv)
+except Exception:
+    pass  # PH_PI's real detail fields differ from this minimal fake - only
+          # the MainDataSet DocNo behavior matters for this check
+assert "DOCNO" in biz2.main.queried, \
+    "a real source doc_no on a non-journal document must still reach SQL"
+print("[poster] a genuine invoice number still reaches SQL as before  OK")
+
 print("\nAll daily-takings checks passed.")
