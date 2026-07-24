@@ -86,11 +86,17 @@ records into SQL Accounting. For each transaction line decide:
    BANK or CASH account for payments (which account the money moved through);
    the adjustment account for journals.
 
-4. contra_account — ONLY for journal lines: the balancing side of the double
-   entry, from the chart of accounts (daily takings/cash sales usually debit
-   a BANK or CASH account and credit an income account, so account_code =
-   income account and contra_account = bank/cash, or vice versa as the sheet
-   implies). "" for every non-journal line.
+4. contra_account — ONLY for a STANDALONE journal line (no other line shares
+   its doc_no): the balancing side of the double entry, from the chart of
+   accounts (daily takings/cash sales usually debit a BANK or CASH account
+   and credit an income account, so account_code = income account and
+   contra_account = bank/cash, or vice versa as the sheet implies).
+   When SEVERAL journal lines share the same doc_no, they are already a
+   pre-split multi-line entry (e.g. one day's takings broken into revenue,
+   tax, and each payment method as separate lines) — leave contra_account
+   "" for every line in that group; they balance each other as a group, not
+   pairwise. Still pick the correct account_code for each one individually.
+   "" for every non-journal line.
 
 5. tax_code — from the client's tax code list ("" if none applies).
 
@@ -109,6 +115,7 @@ def _classify_batch_llm(client, model: str, max_tokens: int,
                         context_block: str, rows: list[dict]) -> dict[int, dict]:
     rows_text = "\n".join(
         f"row_id={r['row_id']} | hint={r.get('doc_type_hint', '') or 'none'} | "
+        f"doc_no={r.get('doc_no', '') or 'none'} | "
         f"date={r['date']} | party={r['supplier']} | desc={r['description']} | "
         f"amount={r['amount']} | tax={r['tax']}"
         for r in rows
@@ -187,7 +194,7 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
         client = anthropic.Anthropic()
         context_block = ctx.as_prompt_block()
         cols = ["date", "supplier", "description", "amount", "tax",
-                "doc_type_hint"]
+                "doc_type_hint", "doc_no"]
         batch_rows = [{"row_id": i, **out.loc[i, cols].to_dict()}
                       for i in pending]
         for start in range(0, len(batch_rows), batch_size):

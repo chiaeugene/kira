@@ -103,15 +103,23 @@ class PostedRegistry:
 
     @staticmethod
     def key(supplier_code: str, doc_no: str, amount: float,
-            doc_type: str = "purchase") -> str:
-        return (f"{doc_type or 'purchase'}|{str(supplier_code).strip()}|"
-                f"{str(doc_no).strip().upper()}|{float(amount):.2f}")
+            doc_type: str = "purchase", extra: str = "") -> str:
+        """extra distinguishes lines with no party that could otherwise
+        collide on the same doc_no+amount (journal lines split from a
+        daily-takings sheet, see kira/ingest.py + kira/validate.py's
+        dup_key — same rule, kept in sync). Appended only when given, so
+        keys already written to posted_registry.json before this existed
+        still match exactly."""
+        base = (f"{doc_type or 'purchase'}|{str(supplier_code).strip()}|"
+               f"{str(doc_no).strip().upper()}|{float(amount):.2f}")
+        return f"{base}|{str(extra).strip().lower()}" if extra else base
 
     def record(self, df: pd.DataFrame) -> None:
         for _, r in df.iterrows():
+            dtp = str(r.get("doc_type", "") or "purchase")
+            extra = str(r.get("description", "")) if dtp == "journal" else ""
             self.keys.add(self.key(r["supplier_code"], r.get("doc_no", ""),
-                                   r["amount"],
-                                   str(r.get("doc_type", "") or "purchase")))
+                                   r["amount"], dtp, extra))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(sorted(self.keys)), encoding="utf-8")
 
@@ -249,14 +257,29 @@ def _post_one(app, inv: dict) -> None:
         return
 
     detail = biz.DataSets.Find("cdsDocDetail")
-    for line in inv["lines"]:
-        detail.Append()
-        if doc_type == "journal":
-            # debit the account, credit the contra (or vice versa if negative)
-            if not line["contra_account"]:
+    if doc_type == "journal":
+        # Two shapes share this one journal document:
+        #  - a line WITH contra_account is its own self-balancing pair
+        #    (debit account_code / credit contra_account, or the reverse
+        #    for a negative amount) — the simple single-line case.
+        #  - a line WITHOUT contra_account is one side of a multi-line
+        #    group (e.g. a daily-takings sheet split into revenue/tax/
+        #    payment lines by kira/ingest.py): posted as a single debit or
+        #    credit, relying on the OTHER blank-contra lines in this same
+        #    document to balance it. The console's approve gate already
+        #    checked this nets to ~zero; re-checked here too, since posting
+        #    must never trust an upstream check blindly.
+        solo = [l for l in inv["lines"] if not l["contra_account"]]
+        if solo:
+            off = sum(l["amount"] for l in solo)
+            if abs(off) > 0.02:
                 raise ValueError(
-                    "journal line has no contra_account — refusing to post "
-                    "an unbalanced entry (fix it in the console and re-approve)")
+                    f"journal lines with no contra_account don't net to "
+                    f"zero (off by RM {abs(off):,.2f}) — refusing to post "
+                    "an unbalanced entry (fix it in the console and "
+                    "re-approve)")
+        for line in inv["lines"]:
+            detail.Append()
             amt = line["amount"]
             _set_first(detail, ("Account", "AccNo", "Code"), line["account_code"])
             _set_first(detail, ("Description",), line["description"])
@@ -271,22 +294,23 @@ def _post_one(app, inv: dict) -> None:
                 _set_first(detail, ("CR", "Credit") if amt >= 0 else ("DR", "Debit"),
                            abs(amt), kind="float")
                 detail.Post()
-            continue
-
-        # invoice-style documents (PH_PI, PH_CN, SL_IV, SL_CN)
-        _set_first(detail, ("Account", "ItemCode"), line["account_code"])
-        _set_first(detail, ("Description",), line["description"])
-        _set_first(detail, ("UnitPrice", "Amount"), line["amount"], kind="float")
-        try:
-            _set_first(detail, ("Qty",), 1, kind="float")
-        except RuntimeError:
-            pass
-        if line["tax_code"]:
+    else:
+        for line in inv["lines"]:
+            detail.Append()
+            # invoice-style documents (PH_PI, PH_CN, SL_IV, SL_CN)
+            _set_first(detail, ("Account", "ItemCode"), line["account_code"])
+            _set_first(detail, ("Description",), line["description"])
+            _set_first(detail, ("UnitPrice", "Amount"), line["amount"], kind="float")
             try:
-                _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
+                _set_first(detail, ("Qty",), 1, kind="float")
             except RuntimeError:
                 pass
-        detail.Post()
+            if line["tax_code"]:
+                try:
+                    _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
+                except RuntimeError:
+                    pass
+            detail.Post()
 
     biz.Save()
 

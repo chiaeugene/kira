@@ -12,7 +12,7 @@ from .audit import AuditLog  # noqa: F401  (type reference)
 from .batches import BatchStore
 from .poster import PostedRegistry
 from .registry import client_dir, open_client
-from .validate import summarize, validate_batch
+from .validate import journal_balanced_groups, summarize, validate_batch
 
 
 def approve_batch(store: BatchStore, batch: dict,
@@ -30,16 +30,22 @@ def approve_batch(store: BatchStore, batch: dict,
     counts = summarize(issues)
     # Journal entries have no supplier/customer by nature — demanding a party
     # code on them made journal batches impossible to approve (field bug).
-    # They need the contra side of the double entry instead.
+    # They need the contra side of the double entry instead — UNLESS they're
+    # part of a balanced multi-line group (e.g. a daily-takings sheet split
+    # into many lines sharing one day's doc_no), which needs no per-row
+    # contra at all. Same rule validate_batch uses, via the same helper, so
+    # the two can never disagree about which rows are "clean".
     dtp = (rows["doc_type"].fillna("").astype(str)
            if "doc_type" in rows.columns else pd.Series("", index=rows.index))
     is_journal = dtp == "journal"
     contra = (rows["contra_account"].fillna("").astype(str).str.strip()
               if "contra_account" in rows.columns
               else pd.Series("", index=rows.index))
+    jg = journal_balanced_groups(rows)
+    needs_contra = is_journal & (contra == "") & ~jg.grp_key.isin(jg.balanced)
     blank = rows[(~is_journal & (rows["supplier_code"] == ""))
                  | (rows["account_code"] == "")
-                 | (is_journal & (contra == ""))]
+                 | needs_contra]
     if counts["error"] > 0 or not blank.empty:
         return False, {
             "message": "batch not clean — fix and re-approve",

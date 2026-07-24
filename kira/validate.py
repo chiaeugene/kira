@@ -44,9 +44,44 @@ PAYMENT_TYPES = ("customer_payment", "supplier_payment")
 
 
 def dup_key(supplier_code: str, doc_no: str, amount: float,
-            doc_type: str = "purchase") -> str:
-    return (f"{doc_type or 'purchase'}|{str(supplier_code).strip()}|"
-            f"{str(doc_no).strip().upper()}|{float(amount):.2f}")
+            doc_type: str = "purchase", extra: str = "") -> str:
+    """extra distinguishes lines that would otherwise collide with no party
+    to tell them apart (journal lines split from a daily-takings sheet, see
+    kira/ingest.py) — appended only when given, so keys already written to
+    a client's posted_registry.json (no 'extra' concept when those were
+    recorded) keep matching exactly as before."""
+    base = (f"{doc_type or 'purchase'}|{str(supplier_code).strip()}|"
+           f"{str(doc_no).strip().upper()}|{float(amount):.2f}")
+    return f"{base}|{str(extra).strip().lower()}" if extra else base
+
+
+@dataclass
+class JournalGroups:
+    grp_key: pd.Series       # row index -> group id (doc_no, or a solo id)
+    balanced: set            # groups with >1 row that net to ~zero
+    unbalanced: set          # groups with >1 row that DON'T net to zero
+    sizes: pd.Series         # group id -> row count (journal rows only)
+    sums: pd.Series          # group id -> signed amount total (journal rows only)
+
+
+def journal_balanced_groups(df: pd.DataFrame) -> JournalGroups:
+    """Group journal rows by doc_no. A blank doc_no never groups (each such
+    row is its own solo group) — used by both validate_batch and
+    kira/review.py so 'does this row need its own contra_account' can never
+    drift between the two call sites."""
+    dtp_all = (df["doc_type"].fillna("").astype(str)
+              if "doc_type" in df.columns else pd.Series("", index=df.index))
+    journal_mask = dtp_all == "journal"
+    doc_no_s = (df["doc_no"].fillna("").astype(str).str.strip()
+               if "doc_no" in df.columns else pd.Series("", index=df.index))
+    grp_key = doc_no_s.where(doc_no_s != "",
+                             other=pd.Series([f"__solo_{i}" for i in df.index],
+                                             index=df.index))
+    sizes = grp_key[journal_mask].value_counts()
+    multi_groups = set(sizes[sizes > 1].index)
+    sums = df.loc[journal_mask].groupby(grp_key[journal_mask])["amount"].sum()
+    balanced = {g for g in multi_groups if abs(sums.get(g, 1.0)) <= 0.02}
+    return JournalGroups(grp_key, balanced, multi_groups - balanced, sizes, sums)
 
 
 def validate_batch(df: pd.DataFrame, ctx: ClientContext,
@@ -75,14 +110,27 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
     def rid(row) -> int:
         return int(row["row_id"]) if "row_id" in row and pd.notna(row.get("row_id")) else -1
 
+    # --- journal multi-line groups: many rows sharing one doc_no (e.g. a
+    # daily-takings sheet split into revenue/tax/payment-method lines by
+    # kira/ingest.py) don't need a contra_account PER ROW — the group just
+    # has to net to ~zero, and kira/poster.py posts each line as a single
+    # debit or credit instead of pairing every line with its own contra.
+    jg = journal_balanced_groups(df)
+    flagged_unbalanced: set[str] = set()
+
     # --- duplicates inside the batch ---
     seen: dict[str, int] = {}
     for _, row in df.iterrows():
         dtp = str(row.get("doc_type", "") or "purchase")
+        # Journal lines split from a daily-takings sheet have no party, and
+        # different categories can coincidentally share the same amount on
+        # the same day (e.g. cash and card both RM162.85) — description is
+        # what actually distinguishes them, so it joins the key for those.
+        extra = str(row.get("description", "")) if dtp == "journal" else ""
         key = dup_key(row.get("supplier_code", ""), row.get("doc_no", ""),
-                      row["amount"], dtp)
+                      row["amount"], dtp, extra)
         alt = dup_key(row.get("supplier", ""), row.get("date", ""),
-                      row["amount"], dtp)
+                      row["amount"], dtp, extra)
         for k in {key, alt}:
             if k in seen:
                 issues.append(Issue(
@@ -93,7 +141,7 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
         seen.setdefault(key, int(row["source_row"]))
         seen.setdefault(alt, int(row["source_row"]))
 
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         sr = int(row["source_row"])
         rid_ = rid(row)
         amount = float(row["amount"])
@@ -115,7 +163,8 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
             dtp = "purchase"
 
         # --- against posted history ---
-        if dup_key(s_code, row.get("doc_no", ""), amount, dtp) in posted_keys:
+        posted_extra = str(row.get("description", "")) if dtp == "journal" else ""
+        if dup_key(s_code, row.get("doc_no", ""), amount, dtp, posted_extra) in posted_keys:
             add(SEV_ERROR, "DUP_POSTED", "Already posted previously for this client.")
 
         # --- party checked against the CORRECT master for the doc type ---
@@ -131,14 +180,28 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
         # --- journals need BOTH sides of the double entry ---
         if dtp == "journal":
             contra = str(row.get("contra_account", "") or "").strip()
-            if not contra:
+            g = jg.grp_key.loc[idx]
+            if contra:
+                if account_codes and contra not in account_codes:
+                    add(SEV_ERROR, "UNKNOWN_ACCOUNT",
+                        f"Contra account '{contra}' is not in the chart of "
+                        "accounts.")
+            elif g in jg.balanced:
+                pass  # multi-line day nets to zero as a group — no single
+                      # row needs its own contra account (see poster.py)
+            elif g in jg.unbalanced:
+                if g not in flagged_unbalanced:
+                    flagged_unbalanced.add(g)
+                    off = abs(jg.sums[g])
+                    add(SEV_ERROR, "JOURNAL_GROUP_UNBALANCED",
+                        f"This day's {int(jg.sizes[g])} journal line(s) "
+                        f"don't net to zero (off by RM {off:,.2f}) and none "
+                        "has its own contra account — check for a missing "
+                        "or misread column.")
+            else:
                 add(SEV_ERROR, "JOURNAL_NO_CONTRA",
                     "Journal line has no contra account — the other side of "
                     "the double entry (often the bank/cash account).")
-            elif account_codes and contra not in account_codes:
-                add(SEV_ERROR, "UNKNOWN_ACCOUNT",
-                    f"Contra account '{contra}' is not in the chart of "
-                    "accounts.")
 
         # --- account checks: exists + is the right KIND for the doc type ---
         if a_code and account_codes and a_code not in account_codes:

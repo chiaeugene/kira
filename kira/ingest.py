@@ -215,6 +215,111 @@ def _read_raw(path: str | Path, sheet: int | str = 0) -> pd.DataFrame:
     return pd.read_excel(p, sheet_name=sheet, header=None, dtype=object)
 
 
+def _exact_header(pattern: str):
+    return re.compile(rf"^\s*{pattern}\s*$", re.IGNORECASE)
+
+
+_GROSS_TOTAL_RE = _exact_header(r"gross\s+total")
+_NET_TOTAL_RE = _exact_header(r"net\s+total")
+_GRAND_TOTAL_RE = _exact_header(r"total")
+
+
+def _find_daily_takings_layout(headers: list) -> dict | None:
+    """Detect a wide 'daily takings' summary sheet: one row per day, revenue
+    columns building up to a GROSS TOTAL, tax/service/rounding adjustments
+    building up to a NET TOTAL, then a breakdown of HOW it was collected
+    (cash, e-wallet, card, transfer...) — a real multi-account journal
+    disguised as one wide row. Returns column-group indices, or None if the
+    sheet doesn't have this shape (falls through to the normal parser)."""
+    gross_idx = next((i for i, h in enumerate(headers)
+                      if _GROSS_TOTAL_RE.match(str(h))), None)
+    net_idx = next((i for i, h in enumerate(headers)
+                    if _NET_TOTAL_RE.match(str(h))), None)
+    if gross_idx is None or net_idx is None or net_idx <= gross_idx:
+        return None
+    date_idx = next((i for i, h in enumerate(headers)
+                     if _match_column(h) == "date"), 0)
+    grand_idx = next((i for i, h in enumerate(headers)
+                      if i > net_idx and _GRAND_TOTAL_RE.match(str(h))), None)
+    revenue_idx = list(range(date_idx + 1, gross_idx))
+    mid_idx = list(range(gross_idx + 1, net_idx))
+    payment_idx = list(range(net_idx + 1, grand_idx if grand_idx is not None
+                             else len(headers)))
+    if not revenue_idx or not payment_idx:
+        return None
+    return {"date": date_idx, "revenue": revenue_idx, "mid": mid_idx,
+            "payment": payment_idx, "net_total": net_idx}
+
+
+def _parse_daily_takings(raw: pd.DataFrame, header_row: int,
+                         layout: dict) -> pd.DataFrame:
+    """Split each day's wide row into balanced journal lines: revenue and
+    tax/service/rounding columns credited (their real GL account, once the
+    AI matches the description against the client's chart of accounts),
+    payment-method columns debited (cash, e-wallet, card...). No single
+    account_code/contra_account pair could represent this correctly — the
+    lines instead share one doc_no per day and must net to ~zero as a group
+    (see kira/validate.py's group-balance check and kira/poster.py's
+    multi-line journal posting)."""
+    headers = list(raw.iloc[header_row])
+    body = raw.iloc[header_row + 1:].reset_index(drop=True)
+    date_idx = layout["date"]
+    rows: list[dict] = []
+    net_totals: list[float] = []
+    payment_total = 0.0
+
+    for i, row in body.iterrows():
+        lead = str(row.iloc[0]).strip() if len(row) else ""
+        if _JUNK_ROW_RE.match(lead):
+            continue
+        date = _clean_date(row.iloc[date_idx])
+        if date is None:
+            continue
+        source_row = header_row + 2 + i
+        day_net = _clean_amount(row.iloc[layout["net_total"]])
+        if day_net:
+            net_totals.append(day_net)
+        # credit side: revenue categories + tax/service/rounding adjustments
+        for idx in layout["revenue"] + layout["mid"]:
+            val = _clean_amount(row.iloc[idx])
+            if not val:
+                continue
+            rows.append({
+                "date": date, "supplier": "",
+                "description": _clean_str(headers[idx]),
+                "amount": round(-val, 2), "tax": 0.0,
+                "doc_no": f"TAKINGS-{date:%Y%m%d}",
+                "doc_type_hint": "journal",
+                "source_row": source_row,
+            })
+        # debit side: how the money was actually collected
+        for idx in layout["payment"]:
+            val = _clean_amount(row.iloc[idx])
+            if not val:
+                continue
+            payment_total += val
+            rows.append({
+                "date": date, "supplier": "",
+                "description": _clean_str(headers[idx]),
+                "amount": round(val, 2), "tax": 0.0,
+                "doc_no": f"TAKINGS-{date:%Y%m%d}",
+                "doc_type_hint": "journal",
+                "source_row": source_row,
+            })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    # Reconciliation reuses the same mechanism as the standard parser: the
+    # sheet's own NET TOTAL column, summed, is the "declared" figure; the
+    # money-collected side is the "parsed" figure. Tracked during the loop,
+    # NOT inferred from amount>0 afterwards — a negated ROUNDING value can
+    # also land positive and would silently double-count otherwise.
+    df.attrs["declared_totals"] = [round(sum(net_totals), 2)] if net_totals else []
+    df.attrs["parsed_total"] = round(payment_total, 2)
+    return df
+
+
 def parse_purchase_listing(path: str | Path, sheet: int | str = 0) -> pd.DataFrame:
     """Parse one messy Excel/CSV sheet into canonical purchase rows."""
     raw = _read_raw(path, sheet)
@@ -223,6 +328,12 @@ def parse_purchase_listing(path: str | Path, sheet: int | str = 0) -> pd.DataFra
 
     if header_row is not None:
         headers = list(raw.iloc[header_row])
+        layout = _find_daily_takings_layout(headers)
+        if layout is not None:
+            df = _parse_daily_takings(raw, header_row, layout)
+            if df.empty:
+                raise ValueError(f"No transaction rows recognized in {path}.")
+            return df
         used: set[str] = set()
         for idx, h in enumerate(headers):
             canon = _match_column(h)
