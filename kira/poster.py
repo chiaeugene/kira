@@ -334,6 +334,12 @@ def dump_fields(cfg: SQLConfig,
 
 MASTER_QUERIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "chart_of_accounts.csv": ((
+        # GL_ACC confirmed live on SQL Account ERP Edition 5.2026.1078.893
+        # (The Voice Karaoke Sdn Bhd, 2026-07-24) via the catalog fallback -
+        # tried first now. GL_MAST (the official SDK wiki's sample name)
+        # kept as a fallback guess for older/other editions.
+        "SELECT CODE, DESCRIPTION, ACCTYPE FROM GL_ACC",
+        "SELECT CODE, DESCRIPTION FROM GL_ACC",
         "SELECT CODE, DESCRIPTION, SPECIALTYPE FROM GL_MAST",
         "SELECT CODE, DESCRIPTION, ACCTYPE FROM GL_MAST",
         "SELECT CODE, DESCRIPTION FROM GL_MAST",
