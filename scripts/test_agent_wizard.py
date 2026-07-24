@@ -59,7 +59,7 @@ def main() -> int:
     dcf = tmp / "Company.DCF"
     fdb1, fdb2 = tmp / "ACC-0001.FDB", tmp / "ACC-0002.FDB"
     agent.scan_sql_companies = lambda roots=None: ([dcf], [fdb1, fdb2], 0)
-    agent.try_extract_company_label = lambda *a, **k: None
+    agent.try_extract_company_label = lambda *a, **k: (None, "no SQL app on this test box")
     agent.fetch_cloud_clients = lambda *a, **k: []
     registered: list[str] = []
     agent.register_client_on_cloud = (

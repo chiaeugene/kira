@@ -189,28 +189,32 @@ def _slugify(text: str) -> str:
 
 
 def try_extract_company_label(user: str, password: str, dcf_path: str,
-                              fdb_name: str) -> str | None:
+                              fdb_name: str) -> tuple[str | None, str]:
     """Best-effort: log into this company via the SDK and read its name.
 
     The exact property name is unconfirmed until dump_fields()/a live-machine
-    check verifies it for this SQL version - several candidates are tried,
-    and any failure (SDK missing, wrong creds, unknown property) is silent.
-    Falls back to the FDB filename when this returns None.
+    check verifies it for this SQL version - several candidates are tried.
+    Falls back to the FDB filename when the name can't be read, but the
+    REASON is always returned - a real problem here (wrong password, an
+    old database format the installed SQL Accounting can't open, ...) is
+    exactly what someone needs to see, not a generic "didn't respond".
+    Returns (label_or_None, reason) - reason is "" on a clean read.
     """
     try:
         import win32com.client
         app = win32com.client.Dispatch("SQLAcc.BizApp")
         app.Login(user, password, dcf_path, fdb_name)
-        for attr in ("CompanyName", "CoyName", "CompanyFullName", "CoName"):
-            try:
-                val = getattr(app, attr)
-                if val:
-                    return str(val)
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
+    except Exception as e:
+        return None, f"SDK login failed: {e}"
+    for attr in ("CompanyName", "CoyName", "CompanyFullName", "CoName"):
+        try:
+            val = getattr(app, attr)
+            if val:
+                return str(val), ""
+        except Exception:
+            continue
+    return None, "logged in, but none of the known company-name fields " \
+                 "were readable (SDK version mismatch - safe to ignore)"
 
 
 def register_client_on_cloud(server: str, token: str, name: str,
@@ -384,14 +388,14 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         password = input("  SQL Accounting password: ").strip()
 
         print("  Reading this company's details...")
-        label = try_extract_company_label(user, password, str(dcf), fdb.name)
+        label, label_err = try_extract_company_label(user, password,
+                                                      str(dcf), fdb.name)
         if label:
             print(f"  Found company name: {label}")
         else:
             label = fdb.stem
-            print("  Could not read the company name automatically - the "
-                  "SDK didn't respond (SQL Accounting app not available, or "
-                  "the username/password wasn't accepted).")
+            print(f"  Could not read the company name automatically: "
+                  f"{label_err}")
             print(f"  Using '{label}' as a placeholder - this is fine; the "
                   "login will be properly verified at the dry-run/go-live "
                   "step.")
