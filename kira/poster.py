@@ -58,6 +58,34 @@ DOC_TYPE_TO_SQL = {
 }
 HEADER_ONLY_TYPES = {"customer_payment", "supplier_payment"}
 
+# purchase_return and supplier_payment came back unavailable (BizObjects.Find
+# returned None) on The Voice Karaoke's install (2026-07-25), despite every
+# OTHER code following this exact naming convention correctly (PH_PI, SL_IV,
+# SL_CN, AR_PM, GL_JE all matched first try) — that consistency makes a
+# naming mistake unlikely; a module simply switched off for this company
+# (File > Customize SQL Account Modules) is the more likely cause. These
+# extra candidates are tried defensively in case it IS a naming variant.
+DOC_TYPE_TO_SQL_CANDIDATES: dict[str, tuple[str, ...]] = {
+    "purchase_return": ("PH_CN", "PH_DN", "PH_DEBITNOTE"),
+    "supplier_payment": ("AP_PM", "AP_PV", "CB_PV"),
+}
+
+
+def _find_biz(app, doc_type: str, default_sql_doc: str):
+    """Resolve a doc_type to its live BizObject, trying every known naming
+    candidate before giving up. Returns (biz, resolved_code) — biz is None
+    if nothing resolved (module likely disabled for this company, see
+    DOC_TYPE_TO_SQL_CANDIDATES)."""
+    candidates = DOC_TYPE_TO_SQL_CANDIDATES.get(doc_type, (default_sql_doc,))
+    for code in candidates:
+        try:
+            biz = app.BizObjects.Find(code)
+            if biz is not None:
+                return biz, code
+        except Exception:
+            continue
+    return None, ""
+
 
 def _rows_to_invoices(df: pd.DataFrame) -> list[dict]:
     """Group approved rows into one SQL document per
@@ -218,7 +246,13 @@ def _set_first(dataset, field_names: tuple[str, ...], value, kind="str") -> str:
 def _post_one(app, inv: dict) -> None:
     """Post one grouped document into its SQL module."""
     doc_type, sql_doc = inv["doc_type"], inv["sql_doc"]
-    biz = app.BizObjects.Find(sql_doc)
+    biz, resolved = _find_biz(app, doc_type, sql_doc)
+    if biz is None:
+        raise ValueError(
+            f"'{doc_type}' has no matching SQL module on this install (tried "
+            f"{DOC_TYPE_TO_SQL_CANDIDATES.get(doc_type, (sql_doc,))}) — most "
+            "likely that module is switched off for this company: check "
+            "File > Customize SQL Account Modules in SQL Accounting.")
     biz.New()
     main = biz.DataSets.Find("MainDataSet")
 
@@ -320,10 +354,12 @@ def _post_one(app, inv: dict) -> None:
 
 
 def dump_fields(cfg: SQLConfig,
-                sql_docs: tuple[str, ...] = tuple(DOC_TYPE_TO_SQL.values())
+                doc_types: tuple[str, ...] = tuple(DOC_TYPE_TO_SQL.keys())
                 ) -> dict[str, dict[str, list[str]]]:
     """Go-live spike helper: list the actual field names of every module's
     datasets on the live machine, so the mappings above can be confirmed.
+    Tries every naming candidate per doc_type (see DOC_TYPE_TO_SQL_CANDIDATES)
+    before giving up, same resolution _post_one uses when actually posting.
     Run from the SQL PC with SQL Accounting installed."""
     import win32com.client
 
@@ -331,10 +367,18 @@ def dump_fields(cfg: SQLConfig,
     if not app.IsLogin:
         app.Login(cfg.user, cfg.password, cfg.dcf_path, cfg.fdb_name)
     result: dict[str, dict[str, list[str]]] = {}
-    for sql_doc in sql_docs:
+    for doc_type in doc_types:
+        default = DOC_TYPE_TO_SQL[doc_type]
+        biz, resolved = _find_biz(app, doc_type, default)
+        sql_doc = f"{doc_type} ({resolved or default})"
         result[sql_doc] = {}
+        if biz is None:
+            tried = DOC_TYPE_TO_SQL_CANDIDATES.get(doc_type, (default,))
+            result[sql_doc]["<unavailable>"] = [
+                f"none of {tried} resolved — likely switched off for this "
+                "company (File > Customize SQL Account Modules)"]
+            continue
         try:
-            biz = app.BizObjects.Find(sql_doc)
             biz.New()
             for ds_name in ("MainDataSet", "cdsDocDetail"):
                 try:

@@ -273,4 +273,46 @@ assert "DOCNO" in biz2.main.queried, \
     "a real source doc_no on a non-journal document must still reach SQL"
 print("[poster] a genuine invoice number still reaches SQL as before  OK")
 
+# --- 6. _find_biz tries every naming candidate before giving up, and
+#     _post_one fails with a clear, actionable message (not a crash) when
+#     none resolve - matches what The Voice Karaoke's real install showed
+#     for purchase_return/supplier_payment (BizObjects.Find -> None).
+from kira.poster import DOC_TYPE_TO_SQL_CANDIDATES, _find_biz
+
+
+class _SelectiveBizObjects:
+    """Only resolves codes in `known` - simulates a module switched off for
+    this company (SQL Accounting returns None, doesn't raise)."""
+    def __init__(self, known: dict):
+        self.known = known
+
+    def Find(self, name):
+        return self.known.get(name)
+
+
+assert DOC_TYPE_TO_SQL_CANDIDATES["purchase_return"][0] == "PH_CN"
+second_guess = DOC_TYPE_TO_SQL_CANDIDATES["purchase_return"][1]
+biz_ok = _FakeBiz()
+app_partial = _FakeApp(biz_ok)
+app_partial.BizObjects = _SelectiveBizObjects({second_guess: biz_ok})
+resolved_biz, resolved_code = _find_biz(app_partial, "purchase_return", "PH_CN")
+assert resolved_biz is biz_ok and resolved_code == second_guess, \
+    f"expected fallback to {second_guess}, got {resolved_code!r}"
+print(f"[poster] first guess PH_CN unavailable -> fell back to "
+     f"{second_guess}  OK")
+
+app_none = _FakeApp(_FakeBiz())
+app_none.BizObjects = _SelectiveBizObjects({})  # nothing resolves
+no_biz, no_code = _find_biz(app_none, "supplier_payment", "AP_PM")
+assert no_biz is None and no_code == ""
+try:
+    _post_one(app_none, {"doc_type": "supplier_payment", "sql_doc": "AP_PM",
+                         "supplier_code": "S1", "doc_date": "2026-07-01",
+                         "doc_no": "", "lines": [{"account_code": "310-000",
+                         "description": "", "amount": 100.0, "tax_code": ""}]})
+    raise AssertionError("expected a ValueError when no module resolves")
+except ValueError as e:
+    assert "Customize SQL Account Modules" in str(e), e
+print("[poster] no module resolves -> clear actionable error, not a crash  OK")
+
 print("\nAll daily-takings checks passed.")
