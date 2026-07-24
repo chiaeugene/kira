@@ -547,11 +547,11 @@ with tab_inbox:
             st.warning(
                 f"**{b['client']} has no chart of accounts yet**, so Kira "
                 "cannot assign account codes — approval will be blocked "
-                "until every line has one. Fix: open the sidebar, use "
-                "**Add masters** to upload this client's chart of accounts "
-                "(plus suppliers / customers / tax codes), then press "
-                "**Re-code with AI** below. Or type the codes into the "
-                "account_code column by hand."
+                "until every line has one. Easiest fix: **restart "
+                "KiraAgent.exe on the SQL PC** — it reads the masters "
+                "straight out of SQL and syncs them here. Then press "
+                "**Re-code with AI** below. (Fallback: sidebar → 'Add "
+                "masters' to upload exports by hand.)"
             )
         if _blank_now and st.button(
                 f"Re-code with AI ({_blank_now} blank line(s))",
@@ -782,9 +782,11 @@ with tab_dash:
                 f"**{names}** "
                 + ("was" if len(needs_masters) == 1 else "were")
                 + " discovered by a Kira Agent but has no master data yet — "
-                "AI coding falls back to weak fuzzy-matching until you upload "
-                "its chart of accounts, suppliers, customers, and tax codes "
-                "(sidebar → '+ Add a new client', re-use the same name)."
+                "AI coding falls back to weak fuzzy-matching until then. "
+                "The Agent reads the masters straight out of SQL and syncs "
+                "them here every time it starts — just restart KiraAgent.exe "
+                "on the SQL PC. (Fallback: sidebar → 'Add masters' to upload "
+                "CSV/Excel exports by hand.)"
             )
         st.dataframe(
             overview_rows.rename(columns={

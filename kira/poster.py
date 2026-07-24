@@ -319,3 +319,92 @@ def dump_fields(cfg: SQLConfig,
         except Exception as e:
             result[sql_doc]["<error>"] = [str(e)]
     return result
+
+
+# ------------------- master data: SQL -> Kira (reverse feed) -------------------
+# The Agent sits on the SQL PC with an SDK login — it can READ the client's
+# chart of accounts, suppliers, customers, and tax codes straight out of SQL
+# and push them to Kira Cloud. Nobody should export CSVs by hand; the manual
+# "Add masters" upload in the console is the fallback, not the main path.
+#
+# Table/column names follow the official SDK wiki samples (DBManager.NewDataSet
+# on GL_MAST / AP_SUPPLIER / AR_CUSTOMER / TAX). Variants are tried in order
+# and the first query that works wins — verified for the site's SQL version
+# at the same go-live step as posting field names.
+
+MASTER_QUERIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "chart_of_accounts.csv": ((
+        "SELECT CODE, DESCRIPTION, SPECIALTYPE FROM GL_MAST",
+        "SELECT CODE, DESCRIPTION, ACCTYPE FROM GL_MAST",
+        "SELECT CODE, DESCRIPTION FROM GL_MAST",
+    ), ("code", "description", "type")),
+    "suppliers.csv": ((
+        "SELECT CODE, COMPANYNAME FROM AP_SUPPLIER",
+        "SELECT CODE, NAME FROM AP_SUPPLIER",
+    ), ("code", "name")),
+    "customers.csv": ((
+        "SELECT CODE, COMPANYNAME FROM AR_CUSTOMER",
+        "SELECT CODE, NAME FROM AR_CUSTOMER",
+    ), ("code", "name")),
+    "tax_codes.csv": ((
+        "SELECT CODE, DESCRIPTION, RATE FROM TAX",
+        "SELECT CODE, DESCRIPTION, TAXRATE FROM TAX",
+        "SELECT CODE, DESCRIPTION FROM TAX",
+    ), ("code", "description", "rate")),
+}
+
+
+def _query_records(app, query: str, out_cols: tuple[str, ...]) -> list[dict]:
+    src_cols = [c.strip() for c in
+                query.split("SELECT", 1)[1].split("FROM", 1)[0].split(",")]
+    ds = app.DBManager.NewDataSet(query)
+    recs: list[dict] = []
+    ds.First()
+    while not ds.Eof:
+        rec = {}
+        for out_c, src_c in zip(out_cols, src_cols):
+            try:
+                v = ds.FindField(src_c).Value
+            except Exception:
+                v = ""
+            rec[out_c] = "" if v is None else str(v).strip()
+        # pad optional columns the query variant didn't include
+        for out_c in out_cols[len(src_cols):]:
+            rec[out_c] = ""
+        if rec[out_cols[0]]:
+            recs.append(rec)
+        ds.Next()
+    return recs
+
+
+def read_masters(cfg: SQLConfig) -> tuple[dict[str, list[dict]], str]:
+    """Read this company's master data out of SQL Accounting via the SDK.
+
+    Returns (masters, error). masters maps our CSV filenames to record lists;
+    error is "" on success, otherwise a short human-readable reason (SDK
+    missing, login rejected, ...). Never raises — master sync is best-effort
+    and must not stop the Agent from doing its main job.
+    """
+    try:
+        import pythoncom
+        import win32com.client
+        pythoncom.CoInitialize()
+        app = win32com.client.Dispatch("SQLAcc.BizApp")
+        app.Login(cfg.user, cfg.password, cfg.dcf_path, cfg.fdb_name)
+    except Exception as e:
+        return {}, f"SDK login failed: {e}"
+    masters: dict[str, list[dict]] = {}
+    problems: list[str] = []
+    for fname, (queries, out_cols) in MASTER_QUERIES.items():
+        for q in queries:
+            try:
+                masters[fname] = _query_records(app, q, out_cols)
+                break
+            except Exception as e:
+                last = str(e)
+        else:
+            problems.append(f"{fname}: {last}")
+    if not masters:
+        return {}, "; ".join(problems)
+    return masters, ("" if not problems else
+                     "partial - " + "; ".join(problems))

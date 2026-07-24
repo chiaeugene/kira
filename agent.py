@@ -36,7 +36,7 @@ import yaml
 
 from kira.batches import records_to_df
 from kira.envfile import load_env
-from kira.poster import SQLConfig, post_batch
+from kira.poster import SQLConfig, post_batch, read_masters
 
 # Everything the Agent reads/writes lives NEXT TO THE PROGRAM, never in
 # whatever folder Windows happens to launch it from (shortcuts / "Run as
@@ -232,6 +232,40 @@ def register_client_on_cloud(server: str, token: str, name: str,
         return None
 
 
+def sync_masters(server: str, token: str, client_name: str,
+                 sql_cfg: dict, agent_name: str = "") -> bool:
+    """Reverse feed: read this company's chart of accounts / suppliers /
+    customers / tax codes out of SQL and push them to Kira Cloud, so the
+    console codes against the REAL ledger without anyone exporting CSVs.
+    Best-effort - a failure is logged and the Agent carries on."""
+    cfg = SQLConfig(dry_run=True, **{k: sql_cfg.get(k, "") for k in
+                                     ("user", "password", "dcf_path",
+                                      "fdb_name")})
+    masters, err = read_masters(cfg)
+    if not masters:
+        log.info("Masters for %s: could not read from SQL (%s) - the "
+                 "console's manual 'Add masters' upload still works.",
+                 client_name, err)
+        return False
+    try:
+        r = httpx.post(f"{server}/api/clients/{client_name}/masters/sync",
+                       headers={"Authorization": f"Bearer {token}"},
+                       json={"masters": masters, "agent_name": agent_name},
+                       timeout=60)
+        r.raise_for_status()
+        counts = r.json().get("saved", {})
+        log.info("Masters for %s synced from SQL -> cloud: %s%s",
+                 client_name,
+                 ", ".join(f"{k.replace('.csv', '')}={v}"
+                           for k, v in counts.items()),
+                 f"  ({err})" if err else "")
+        return True
+    except Exception as e:
+        log.info("Masters for %s read OK but cloud push failed: %s",
+                 client_name, e)
+        return False
+
+
 def fetch_cloud_clients(server: str, token: str) -> list[dict]:
     """The Agent's own view of Kira Cloud's client list - read-only, uses
     the agent token (server accepts either token on this endpoint)."""
@@ -390,6 +424,15 @@ def setup_wizard(config_path: str = "agent_config.yaml") -> bool:
         _save_cfg(config_path, agent_name, server, token, clients)
         print(f"  Mapped {cname} -> {fdb.name} (dry-run until the go-live "
               f"test) - SAVED to {config_path}.")
+        print("  Reading this company's master data from SQL...")
+        if sync_masters(server, token, cname, clients[cname], agent_name):
+            print("  Chart of accounts / suppliers / customers / tax codes "
+                  "sent to Kira Cloud - the console can code this client's "
+                  "documents properly from the first upload.")
+        else:
+            print("  (Could not auto-read the masters - they can be uploaded "
+                  "in the console under 'Add masters', or this will retry "
+                  "every time the Agent starts.)")
 
     if not clients:
         print("No clients mapped - nothing written.")
@@ -441,6 +484,13 @@ def main() -> int:
         cfg = load_cfg(args.config)
 
     banner(cfg)
+
+    # Reverse feed on every start: push each company's CURRENT master data
+    # from SQL to the cloud, so the console always codes against the real
+    # ledger (new accounts/suppliers added in SQL flow up automatically).
+    for _cname, _ccfg in cfg["clients"].items():
+        sync_masters(cfg["server_url"], cfg["agent_token"], _cname, _ccfg,
+                     cfg.get("agent_name", ""))
 
     if args.once:
         try:

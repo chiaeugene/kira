@@ -253,6 +253,25 @@ r = api.post(f"/api/clients/DISCOVERED_CO/masters", headers=FIRM,
                                  b"code,name\n1,Real One\n", "text/csv")})
 assert r.status_code == 200
 
+# 8d. reverse master feed: the Agent pushes masters read from SQL itself
+r = api.post("/api/clients/DISCOVERED_CO/masters/sync", headers=AGENT, json={
+    "agent_name": "test-office-pc",
+    "masters": {
+        "chart_of_accounts.csv": [
+            {"code": "310-000", "description": "CASH", "type": "CASH"},
+            {"code": "500-000", "description": "SALES", "type": "SALES"}],
+        "customers.csv": [{"code": "300-C01", "name": "Walk-in"}],
+    }})
+assert r.status_code == 200, r.text
+assert r.json()["saved"] == {"chart_of_accounts.csv": 2, "customers.csv": 1}
+r = api.post("/api/clients/DISCOVERED_CO/masters/sync", headers=FIRM,
+             json={"masters": {}})
+assert r.status_code == 401, "masters/sync is agent-only"
+disc = next(c for c in api.get("/api/clients", headers=FIRM).json()
+            if c["name"] == "DISCOVERED_CO")
+assert disc["accounts"] == 2 and disc["customers"] == 1, disc
+print("[masters-sync] agent pushed SQL masters -> cloud; firm token rejected  OK")
+
 r = api.post("/api/clients/register", headers=AGENT,
              json={"name": "DISCOVERED_CO", "label": "should be ignored",
                   "fdb_name": "ACC-7777.FDB"})

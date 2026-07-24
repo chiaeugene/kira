@@ -432,6 +432,36 @@ async def upload_masters_endpoint(
     return {"client": client, "saved": saved}
 
 
+@app.post("/api/clients/{client}/masters/sync",
+          dependencies=[Depends(agent_auth)])
+def sync_masters_endpoint(client: str, body: dict):
+    """Reverse feed: the Agent reads master data straight out of SQL
+    Accounting on its PC and pushes it here — nobody exports CSVs by hand.
+    Body: {"masters": {"chart_of_accounts.csv": [{code,description,type}...],
+    ...}, "agent_name": "..."}. Replaces the stored masters (SQL is the
+    source of truth); learned rules and audit history are untouched."""
+    _require_client(client)
+    masters = body.get("masters") or {}
+    files: dict[str, bytes] = {}
+    for fname, recs in masters.items():
+        if recs:
+            files[fname] = pd.DataFrame(recs).to_csv(index=False).encode()
+    if not files:
+        raise HTTPException(422, "no master records in payload")
+    try:
+        saved = save_masters(client, files)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    meta_path = client_dir(client) / "kira_meta.json"
+    meta = (json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta_path.exists() else {})
+    meta["masters_synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta["masters_synced_by"] = str(body.get("agent_name", ""))
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    counts = {f: len(masters[f]) for f in saved}
+    return {"client": client, "saved": counts}
+
+
 def _json_records(df: pd.DataFrame) -> list[dict]:
     """DataFrame -> JSON-safe records (NaN becomes null, numpy types unwrap)."""
     return json.loads(df.to_json(orient="records")) if not df.empty else []
