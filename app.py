@@ -553,9 +553,18 @@ with tab_inbox:
                 "**Re-code with AI** below. (Fallback: sidebar → 'Add "
                 "masters' to upload exports by hand.)"
             )
+        elif _blank_now:
+            st.info(
+                f"This batch has {_blank_now} line(s) with no account code — "
+                f"it was coded before {b['client']}'s master data arrived, so "
+                "Kira had nothing to code against yet. The masters are here "
+                "now: press **Re-code with AI** below FIRST, before using "
+                "suggested repairs or approving — it re-runs the coding "
+                "against the real chart of accounts."
+            )
         if _blank_now and st.button(
                 f"Re-code with AI ({_blank_now} blank line(s))",
-                key=f"rc_{bid}",
+                key=f"rc_{bid}", type="primary",
                 help="Runs AI coding again on this batch using the client's "
                      "current master data — use after uploading masters."):
             with st.spinner("Re-coding this batch..."):
