@@ -27,6 +27,7 @@ client_data/*/sql_company.yaml
 Thumbs.db
 .DS_Store
 
-# Staff distribution artifacts (built locally, never committed)
-KiraAgent_ForStaff/
-KiraAgent_ForStaff.zip
+# Staff distribution artifacts (built locally, never committed) — covers
+# every versioned copy too (KiraAgent_ForStaff_v2/, _v3.zip, ...)
+KiraAgent_ForStaff*/
+KiraAgent_ForStaff*.zip
