@@ -353,6 +353,17 @@ MASTER_QUERIES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     ), ("code", "description", "rate")),
 }
 
+# When every guessed table name in MASTER_QUERIES fails (e.g. this edition
+# calls the chart of accounts something other than GL_MAST), fall back to
+# asking Firebird's own system catalog for real table names matching these
+# patterns, then try a plain CODE/DESCRIPTION select against each.
+GL_TABLE_HINTS: dict[str, tuple[str, ...]] = {
+    "chart_of_accounts.csv": ("%GL%", "%ACCOUNT%", "%COA%"),
+    "suppliers.csv": ("%SUPPLIER%",),
+    "customers.csv": ("%CUSTOMER%",),
+    "tax_codes.csv": ("%TAX%",),
+}
+
 
 def _query_records(app, query: str, out_cols: tuple[str, ...]) -> list[dict]:
     src_cols = [c.strip() for c in
@@ -377,6 +388,27 @@ def _query_records(app, query: str, out_cols: tuple[str, ...]) -> list[dict]:
     return recs
 
 
+def _find_tables_like(app, patterns: tuple[str, ...]) -> list[str]:
+    """Ask Firebird's own system catalog for real table names matching any
+    of the given LIKE patterns — used when our guessed table name is wrong,
+    instead of guessing again. Never raises; returns [] on any failure."""
+    found: list[str] = []
+    try:
+        where = " OR ".join(f"RDB$RELATION_NAME LIKE '{p}'" for p in patterns)
+        ds = app.DBManager.NewDataSet(
+            f"SELECT RDB$RELATION_NAME FROM RDB$RELATIONS "
+            f"WHERE RDB$SYSTEM_FLAG = 0 AND ({where})")
+        ds.First()
+        while not ds.Eof:
+            name = ds.FindField("RDB$RELATION_NAME").Value
+            if name:
+                found.append(str(name).strip())
+            ds.Next()
+    except Exception:
+        return []
+    return found
+
+
 def read_masters(cfg: SQLConfig) -> tuple[dict[str, list[dict]], str]:
     """Read this company's master data out of SQL Accounting via the SDK.
 
@@ -395,6 +427,7 @@ def read_masters(cfg: SQLConfig) -> tuple[dict[str, list[dict]], str]:
         return {}, f"SDK login failed: {e}"
     masters: dict[str, list[dict]] = {}
     problems: list[str] = []
+    notes: list[str] = []
     for fname, (queries, out_cols) in MASTER_QUERIES.items():
         for q in queries:
             try:
@@ -403,8 +436,28 @@ def read_masters(cfg: SQLConfig) -> tuple[dict[str, list[dict]], str]:
             except Exception as e:
                 last = str(e)
         else:
-            problems.append(f"{fname}: {last}")
+            # None of our guessed table names worked — ask Firebird's own
+            # catalog what tables actually exist that look like this one,
+            # and try CODE/DESCRIPTION against each real candidate.
+            like = GL_TABLE_HINTS.get(fname)
+            candidates = _find_tables_like(app, like) if like else []
+            for tbl in candidates:
+                try:
+                    masters[fname] = _query_records(
+                        app, f"SELECT CODE, DESCRIPTION FROM {tbl}",
+                        ("code", "description"))
+                    notes.append(f"{fname}: our guessed table name(s) "
+                                f"didn't exist, but found and used '{tbl}' "
+                                "via the database catalog")
+                    break
+                except Exception as e:
+                    last = str(e)
+            if fname not in masters:
+                hint = (f" (catalog also checked, candidates tried: "
+                        f"{candidates})" if candidates else
+                        " (catalog search found no likely table either)")
+                problems.append(f"{fname}: {last}{hint}")
     if not masters:
         return {}, "; ".join(problems)
-    return masters, ("" if not problems else
-                     "partial - " + "; ".join(problems))
+    parts = (["partial - " + "; ".join(problems)] if problems else []) + notes
+    return masters, "; ".join(parts)
