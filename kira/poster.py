@@ -224,23 +224,45 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
     }
 
 
+def _real_field_names(dataset) -> dict[str, str]:
+    """UPPER(name) -> actual stored name, for every field on this dataset."""
+    return {dataset.Fields.Items(i).FieldName.upper():
+            dataset.Fields.Items(i).FieldName
+            for i in range(dataset.Fields.Count)}
+
+
 def _set_first(dataset, field_names: tuple[str, ...], value, kind="str") -> str:
-    """Set the first field name that exists; fail loudly if none do."""
+    """Set the first field name that exists; fail loudly if none do.
+
+    Matches case-INsensitively against the dataset's real fields, then
+    writes using the exact stored casing. dataset.FindField() itself turned
+    out to be case-sensitive on The Voice Karaoke's SQL Accounting install
+    (2026-07-25 field bug: every candidate here is written in mixed case
+    like 'DocDate', but the real field is 'DOCDATE' — FindField('DocDate')
+    raised on all 19 invoices in the very first live-post attempt, for
+    every single field, on every document type). Nothing was ever written
+    to SQL from that failure - it happens before biz.Save() is reached.
+    """
+    real = _real_field_names(dataset)
     for name in field_names:
+        actual = real.get(name.upper())
+        if actual is None:
+            continue
         try:
-            f = dataset.FindField(name)
+            f = dataset.FindField(actual)
             if kind == "float":
                 f.AsFloat = float(value)
             elif kind == "date":
                 f.AsDateTime = value
             else:
                 f.AsString = str(value)
-            return name
+            return actual
         except Exception:
             continue
     raise RuntimeError(
-        f"None of the fields {field_names} exist on this dataset — run "
-        "dump_fields() on this SQL version and adjust the mapping.")
+        f"None of the fields {field_names} exist on this dataset (real "
+        f"fields: {sorted(real.values())}) — run dump_fields() on this SQL "
+        "version and adjust the mapping.")
 
 
 def _post_one(app, inv: dict) -> None:

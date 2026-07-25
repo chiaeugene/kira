@@ -182,16 +182,38 @@ class _FakeField:
     AsDateTime = AsString
 
 
+class _FakeFieldMeta:
+    def __init__(self, name):
+        self.FieldName = name
+
+
+class _FakeFields:
+    def __init__(self, names):
+        self._names = names
+
+    @property
+    def Count(self):
+        return len(self._names)
+
+    def Items(self, i):
+        return _FakeFieldMeta(self._names[i])
+
+
 class _FakeDataSet:
-    REAL_FIELDS = {"DOCDATE", "POSTDATE", "DOCNO", "CODE", "DESCRIPTION",
-                   "DR", "CR"}  # GL_JE, per the live dump_fields output
+    # GL_JE's real field names, exactly as dump_fields returned them on
+    # 2026-07-25 - all-caps, which is the whole point: FindField() on this
+    # SQL Accounting install is CASE-SENSITIVE, so this fake must be too, or
+    # it would mask the exact bug that just hit production.
+    REAL_FIELDS = ("DOCDATE", "POSTDATE", "DOCNO", "CODE", "DESCRIPTION",
+                  "DR", "CR")
 
     def __init__(self):
         self.queried: list[str] = []
+        self.Fields = _FakeFields(self.REAL_FIELDS)
 
     def FindField(self, name):
-        self.queried.append(name.upper())
-        if name.upper() not in self.REAL_FIELDS:
+        self.queried.append(name)
+        if name not in self.REAL_FIELDS:  # exact-case match only
             raise Exception(f"field {name} not found")
         return _FakeField()
 
@@ -247,6 +269,12 @@ journal_inv = {
               "amount": 147.2, "tax_code": "", "contra_account": ""}],
 }
 _post_one(app, journal_inv)
+# The exact production bug (2026-07-25): candidate 'DocDate' (mixed case)
+# must still resolve against the real field 'DOCDATE' (all-caps) even
+# though FindField() itself is case-sensitive here - _set_first now
+# resolves case-insensitively BEFORE calling FindField with the real name.
+assert "DOCDATE" in biz.main.queried, \
+    f"'DocDate' candidate must resolve to real field DOCDATE, queried={biz.main.queried}"
 assert "DOCNO" not in biz.main.queried, \
     f"journal must NOT write its internal grouping key to SQL's DocNo, queried={biz.main.queried}"
 assert "CODE" in biz.detail.queried, "journal detail account must use CODE (confirmed field name)"
