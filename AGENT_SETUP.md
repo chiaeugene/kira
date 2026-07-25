@@ -5,7 +5,13 @@ What to hand the firm (one folder, e.g. `C:\KiraAgent\`):
 ```
 KiraAgent.exe        (built with: pyinstaller --onefile --name KiraAgent
                       --hidden-import win32com --hidden-import win32com.client
-                      --hidden-import pythoncom --console agent.py)
+                      --hidden-import pythoncom --hidden-import win32timezone
+                      --console agent.py)
+                     (win32timezone is NOT optional: pywin32 imports it
+                      lazily the moment a datetime is marshalled to COM —
+                      i.e. the first time a DocDate is set on a live post.
+                      Omitting it builds an exe where everything works
+                      EXCEPT writing dates into SQL: 2026-07-25 field bug.)
 agent_config.yaml    (filled in during onboarding — see below)
 .env                 (two lines: KIRA_SERVER_URL=...  KIRA_AGENT_TOKEN=...)
 ```
