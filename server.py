@@ -34,6 +34,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from kira.batches import (BatchStore, ensure_row_ids, records_to_df,
                           source_channel)
@@ -143,9 +144,14 @@ async def _ingest_uploads(client: str, files: list[UploadFile],
             notes.append(f"{len(docs)} document file(s) held — AI extraction "
                          "is off (no ANTHROPIC_API_KEY on the server)")
         else:
-            extracted = extract_documents(docs, model=LLM["model"],
-                                          max_tokens=LLM["max_tokens"],
-                                          client_name=client)
+            # extract_documents makes blocking Claude calls - this function
+            # runs inside an async def route, so without a threadpool it
+            # would freeze the whole server's single event loop (including
+            # its own health check) for the entire call, exactly what
+            # produced a Render 502 on a large batch (2026-07-25 field bug).
+            extracted = await run_in_threadpool(
+                extract_documents, docs, model=LLM["model"],
+                max_tokens=LLM["max_tokens"], client_name=client)
             frames.append(extracted)
             notes.append(f"{len(docs)} document file(s) -> {len(extracted)} entries")
             for name, data in docs:
@@ -186,7 +192,13 @@ def _summary(batch: dict) -> dict:
 async def upload(client: str, files: list[UploadFile], force: bool = False):
     _require_client(client)
     raw, notes = await _ingest_uploads(client, files, "upload", force=force)
-    batch = _code_and_batch(client, raw, notes, [f.filename for f in files])
+    # _code_and_batch makes several blocking Claude calls (one per 20-row
+    # chunk) - off the event loop, or a large batch blocks EVERY request
+    # this server is handling, including its own health check, long enough
+    # for Render's proxy to 502 the client (2026-07-25 field bug: a 19-day,
+    # ~190-line batch did exactly this).
+    batch = await run_in_threadpool(_code_and_batch, client, raw, notes,
+                                    [f.filename for f in files])
     return _summary(batch)
 
 
@@ -194,7 +206,8 @@ async def upload(client: str, files: list[UploadFile], force: bool = False):
 async def whatsapp_intake(file: UploadFile, phone: str = Query(...)):
     client = _map_sender("phone_map.yaml", phone, "WhatsApp")
     raw, notes = await _ingest_uploads(client, [file], "whatsapp")
-    batch = _code_and_batch(client, raw, notes, [f"whatsapp:{file.filename}"])
+    batch = await run_in_threadpool(_code_and_batch, client, raw, notes,
+                                    [f"whatsapp:{file.filename}"])
     return _summary(batch)
 
 
@@ -202,7 +215,8 @@ async def whatsapp_intake(file: UploadFile, phone: str = Query(...)):
 async def telegram_intake(file: UploadFile, chat_id: str = Query(...)):
     client = _map_sender("telegram_map.yaml", chat_id, "Telegram")
     raw, notes = await _ingest_uploads(client, [file], "telegram")
-    batch = _code_and_batch(client, raw, notes, [f"telegram:{file.filename}"])
+    batch = await run_in_threadpool(_code_and_batch, client, raw, notes,
+                                    [f"telegram:{file.filename}"])
     return _summary(batch)
 
 

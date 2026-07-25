@@ -26,6 +26,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -197,21 +198,36 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
                 "doc_type_hint", "doc_no"]
         batch_rows = [{"row_id": i, **out.loc[i, cols].to_dict()}
                       for i in pending]
-        for start in range(0, len(batch_rows), batch_size):
-            chunk = batch_rows[start:start + batch_size]
-            results = _classify_batch_llm(client, model, max_tokens,
-                                          context_block, chunk)
-            for r in chunk:
-                res = results.get(r["row_id"])
-                if res is None:
-                    continue
-                i = r["row_id"]
-                out.loc[i, ["doc_type", "supplier_code", "account_code",
-                            "contra_account", "tax_code"]] = [
-                    res["doc_type"], res["party_code"], res["account_code"],
-                    res.get("contra_account", ""), res["tax_code"]]
-                out.loc[i, ["confidence", "source", "reason"]] = [
-                    res["confidence"], "llm", res["reason"]]
+        chunks = [batch_rows[start:start + batch_size]
+                 for start in range(0, len(batch_rows), batch_size)]
+
+        # Chunks are independent (each is its own Claude call) - run them
+        # concurrently instead of one after another. A large batch (e.g. a
+        # month of daily-takings lines, ~10 chunks) run sequentially can
+        # take long enough to hit a hosting platform's request timeout even
+        # though the server itself stays healthy throughout (2026-07-25
+        # field bug: a 502 on a 19-day batch, nothing server-side actually
+        # failed - it just took too long). Results are collected here and
+        # applied to `out` only after every chunk finishes, on this one
+        # thread, so there's no concurrent-write risk on the DataFrame.
+        all_results: dict[int, dict] = {}
+        with ThreadPoolExecutor(max_workers=min(5, len(chunks)) or 1) as pool:
+            futures = [pool.submit(_classify_batch_llm, client, model,
+                                   max_tokens, context_block, chunk)
+                      for chunk in chunks]
+            for f in futures:
+                all_results.update(f.result())
+
+        for i in pending:
+            res = all_results.get(i)
+            if res is None:
+                continue
+            out.loc[i, ["doc_type", "supplier_code", "account_code",
+                        "contra_account", "tax_code"]] = [
+                res["doc_type"], res["party_code"], res["account_code"],
+                res.get("contra_account", ""), res["tax_code"]]
+            out.loc[i, ["confidence", "source", "reason"]] = [
+                res["confidence"], "llm", res["reason"]]
         return out
 
     # Pass 3 — offline heuristic fallback (no API credentials)
