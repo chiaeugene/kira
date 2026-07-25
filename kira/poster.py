@@ -30,6 +30,7 @@ setters try known field-name variants and fail loudly, never silently.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import time
 from dataclasses import dataclass
@@ -231,38 +232,67 @@ def _real_field_names(dataset) -> dict[str, str]:
             for i in range(dataset.Fields.Count)}
 
 
-def _set_first(dataset, field_names: tuple[str, ...], value, kind="str") -> str:
-    """Set the first field name that exists; fail loudly if none do.
+def _coerce(value, kind: str):
+    """Convert to the Python type COM marshals correctly for this field kind.
+    Dates especially: a plain 'YYYY-MM-DD' string is NOT a date to the SDK -
+    pywin32 converts a real datetime into a proper COM date automatically."""
+    if kind == "float":
+        return float(value)
+    if kind == "date":
+        if isinstance(value, _dt.datetime):
+            return value
+        if isinstance(value, _dt.date):
+            return _dt.datetime(value.year, value.month, value.day)
+        return _dt.datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    return str(value)
 
-    Matches case-INsensitively against the dataset's real fields, then
-    writes using the exact stored casing. dataset.FindField() itself turned
-    out to be case-sensitive on The Voice Karaoke's SQL Accounting install
-    (2026-07-25 field bug: every candidate here is written in mixed case
-    like 'DocDate', but the real field is 'DOCDATE' — FindField('DocDate')
-    raised on all 19 invoices in the very first live-post attempt, for
-    every single field, on every document type). Nothing was ever written
-    to SQL from that failure - it happens before biz.Save() is reached.
+
+def _set_first(dataset, field_names: tuple[str, ...], value, kind="str") -> str:
+    """Set the first field that accepts the value; fail loudly - with the
+    REAL underlying errors - if none do.
+
+    Two hard-won field lessons (The Voice Karaoke, 2026-07-25) baked in:
+
+    - Set via .Value first, the way the official SDK samples do (and the
+      way read_masters() successfully READS on this same machine). The
+      typed AsString/AsFloat/AsDateTime setters this used to rely on are
+      not dependably settable through the COM wrapper - and dates passed
+      as 'YYYY-MM-DD' strings fail type conversion regardless (_coerce
+      turns them into real datetimes, which pywin32 marshals as COM dates).
+
+    - NEVER swallow the assignment error and report 'field does not exist'.
+      That exact lie cost two live-post attempts: the field was there all
+      along, the VALUE ASSIGNMENT was failing, and the blanket
+      except/continue rewrote the real error into a misleading one.
+
+    Candidate names still match case-insensitively against the dataset's
+    real fields (belt), then FindField is called with the exact stored
+    casing (braces).
     """
     real = _real_field_names(dataset)
+    coerced = _coerce(value, kind)
+    typed_setter = {"float": "AsFloat", "date": "AsDateTime"}.get(kind, "AsString")
+    attempts: list[str] = []
     for name in field_names:
         actual = real.get(name.upper())
         if actual is None:
+            attempts.append(f"{name}: not a field on this dataset")
             continue
         try:
             f = dataset.FindField(actual)
-            if kind == "float":
-                f.AsFloat = float(value)
-            elif kind == "date":
-                f.AsDateTime = value
-            else:
-                f.AsString = str(value)
-            return actual
-        except Exception:
+        except Exception as e:
+            attempts.append(f"{actual}: FindField failed: {e}")
             continue
+        for setter in ("Value", typed_setter):
+            try:
+                setattr(f, setter, coerced)
+                return actual
+            except Exception as e:
+                attempts.append(f"{actual}.{setter} = {coerced!r}: {e}")
     raise RuntimeError(
-        f"None of the fields {field_names} exist on this dataset (real "
-        f"fields: {sorted(real.values())}) — run dump_fields() on this SQL "
-        "version and adjust the mapping.")
+        f"Could not set any of {field_names} — attempts: "
+        + "; ".join(attempts)
+        + f" (dataset's real fields: {sorted(real.values())})")
 
 
 def _post_one(app, inv: dict) -> None:

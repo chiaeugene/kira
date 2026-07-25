@@ -167,19 +167,31 @@ from kira.poster import _post_one
 
 
 class _FakeField:
+    """Faithful to what the REAL SDK's COM wrapper did on The Voice
+    Karaoke's install (2026-07-25): .Value is settable (the official SDK
+    samples write via .Value, and read_masters successfully READ via
+    .Value on that same machine), but the typed AsString/AsFloat/
+    AsDateTime setters RAISE on assignment - which is exactly what sank
+    two live-post attempts while the old code swallowed the error and
+    blamed a 'missing field' instead."""
+
     def __init__(self):
-        self.value = None
+        self.stored = None
 
     @property
-    def AsString(self):
-        return self.value
+    def Value(self):
+        return self.stored
 
-    @AsString.setter
-    def AsString(self, v):
-        self.value = v
+    @Value.setter
+    def Value(self, v):
+        self.stored = v
 
-    AsFloat = AsString
-    AsDateTime = AsString
+    def _refuse(self, v):
+        raise Exception("typed As* setters not settable via COM wrapper")
+
+    AsString = property(lambda self: self.stored, _refuse)
+    AsFloat = property(lambda self: self.stored, _refuse)
+    AsDateTime = property(lambda self: self.stored, _refuse)
 
 
 class _FakeFieldMeta:
@@ -210,12 +222,13 @@ class _FakeDataSet:
     def __init__(self):
         self.queried: list[str] = []
         self.Fields = _FakeFields(self.REAL_FIELDS)
+        self.fields = {n: _FakeField() for n in self.REAL_FIELDS}
 
     def FindField(self, name):
         self.queried.append(name)
         if name not in self.REAL_FIELDS:  # exact-case match only
             raise Exception(f"field {name} not found")
-        return _FakeField()
+        return self.fields[name]
 
     def Append(self):
         pass
@@ -275,6 +288,11 @@ _post_one(app, journal_inv)
 # resolves case-insensitively BEFORE calling FindField with the real name.
 assert "DOCDATE" in biz.main.queried, \
     f"'DocDate' candidate must resolve to real field DOCDATE, queried={biz.main.queried}"
+# ...set through .Value (the As* setters raise in this fake, like the real
+# COM wrapper), and as a REAL datetime, not the 'YYYY-MM-DD' string.
+assert isinstance(biz.main.fields["DOCDATE"].stored, dt.datetime), \
+    f"doc date must arrive as a datetime, got {type(biz.main.fields['DOCDATE'].stored)}"
+assert biz.main.fields["DOCDATE"].stored == dt.datetime(2026, 7, 1)
 assert "DOCNO" not in biz.main.queried, \
     f"journal must NOT write its internal grouping key to SQL's DocNo, queried={biz.main.queried}"
 assert "CODE" in biz.detail.queried, "journal detail account must use CODE (confirmed field name)"
