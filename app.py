@@ -256,9 +256,17 @@ with st.sidebar.expander("Remove a client"):
 
 n_inbox = (len(api.batches(state="review")) if REMOTE
            else len(batch_store.list(state="review")))
-tab_names = ["Convert", f"Inbox ({n_inbox})" if n_inbox else "Inbox",
-             "Connections", "Firm overview", "Client history"]
-tab_batch, tab_inbox, tab_conn, tab_dash, tab_history = st.tabs(tab_names)
+# Persistent navigation instead of st.tabs: tabs ALWAYS snap back to the
+# first one on any rerun, so approving a batch in the Inbox "bounced" the
+# user to Convert and looked like an error even when everything worked
+# (field feedback). A keyed radio keeps the page across reruns.
+_PAGES = ["Convert", "Inbox", "Connections", "Firm overview",
+          "Client history"]
+_page_labels = {p: (f"Inbox ({n_inbox})" if p == "Inbox" and n_inbox else p)
+                for p in _PAGES}
+page = st.radio("Navigation", _PAGES, key="nav_page", horizontal=True,
+                format_func=lambda p: _page_labels[p],
+                label_visibility="collapsed")
 
 
 # ---------- shared helpers ----------
@@ -326,7 +334,7 @@ def show_repairs(fixes: pd.DataFrame, key: str) -> bool:
 
 
 # =============================== CONVERT ===============================
-with tab_batch:
+if page == "Convert":
     show_hero = "coded" not in st.session_state and "upload_result" not in st.session_state
     if show_hero:
         impact = (ui.impact_from_rows(api.overview()["clients"]) if REMOTE
@@ -518,7 +526,7 @@ with tab_batch:
             st.rerun()
 
 # ================================ INBOX ================================
-with tab_inbox:
+if page == "Inbox":
     st.subheader("Waiting for verification")
     st.caption(
         "Everything that arrives by Telegram, WhatsApp, or API upload lands "
@@ -674,8 +682,62 @@ with tab_inbox:
             time.sleep(1.2)
             st.rerun()
 
+    # ---- Activity: every batch, every state, with the real failure
+    # reason — previously only visible in the Agent's terminal window
+    # on the SQL PC (field feedback: "it should be more detailed, which
+    # batch at which time, whether they failed or what").
+    st.divider()
+    st.subheader("Activity")
+    _all = (api.batches() if REMOTE else batch_store.list())
+    if not _all:
+        st.caption("No batches yet.")
+    else:
+        _STATE_LABEL = {
+            "review": "🟡 waiting for review",
+            "approved": "🟠 approved — waiting for the Agent",
+            "dispatched": "🔵 picked up by the Agent — posting now",
+            "posted": "🟢 posted into SQL",
+            "failed": "🔴 FAILED at the Agent",
+            "rejected": "⚪ rejected",
+        }
+
+        def _asum(x):
+            if REMOTE:
+                return x
+            return {"batch_id": x["id"], "client": x["client"],
+                    "state": x["state"], "channel": source_channel(x),
+                    "lines": len(x["rows"]), "total_rm": x["total_rm"],
+                    "created_at": x.get("created_at", ""),
+                    "updated_at": (x["history"][-1]["ts"] if x.get("history")
+                                   else x.get("created_at", "")),
+                    "agent_errors": x.get("agent_errors", []),
+                    "agent_mode": x.get("agent_mode", "")}
+
+        _rows = sorted((_asum(x) for x in _all),
+                       key=lambda r: r.get("updated_at", ""), reverse=True)
+        st.dataframe(pd.DataFrame([{
+            "when": r.get("updated_at", ""),
+            "batch": r["batch_id"],
+            "client": r["client"],
+            "via": r["channel"],
+            "lines": r["lines"],
+            "RM": r["total_rm"],
+            "status": _STATE_LABEL.get(r["state"], r["state"]),
+        } for r in _rows]), width="stretch", hide_index=True)
+
+        _failed = [r for r in _rows if r["state"] == "failed"
+                   and r.get("agent_errors")]
+        for r in _failed[:5]:
+            with st.expander(f"Why {r['batch_id']} failed "
+                             f"({len(r['agent_errors'])} error(s))"):
+                for e in r["agent_errors"][:5]:
+                    st.code(str(e), language=None)
+                if len(r["agent_errors"]) > 5:
+                    st.caption(f"...and {len(r['agent_errors']) - 5} more "
+                               "(all identical causes are usually one fix)")
+
 # ============================= CONNECTIONS =============================
-with tab_conn:
+if page == "Connections":
     st.subheader("How Kira reaches SQL Accounting")
     st.markdown(
         "There is no cable to plug in here — the connection **is the Kira "
@@ -763,7 +825,7 @@ with tab_conn:
         )
 
 # ============================ FIRM OVERVIEW ============================
-with tab_dash:
+if page == "Firm overview":
     st.subheader("Pipeline queue")
     if REMOTE:
         ov = api.overview()
@@ -833,7 +895,7 @@ with tab_dash:
         )
 
 # ============================ CLIENT HISTORY ============================
-with tab_history:
+if page == "Client history":
     st.subheader(f"{client_name} — audit trail")
     if REMOTE:
         h = api.history(client_name)

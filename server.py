@@ -176,6 +176,7 @@ def _summary(batch: dict) -> dict:
     counts = pd.DataFrame(batch["issues"])
     sev = (counts["severity"].value_counts().to_dict()
            if not counts.empty else {})
+    hist = batch.get("history") or []
     return {
         "batch_id": batch["id"], "client": batch["client"],
         "state": batch["state"], "channel": source_channel(batch),
@@ -183,6 +184,12 @@ def _summary(batch: dict) -> dict:
         "errors": int(sev.get("error", 0)),
         "warnings": int(sev.get("warning", 0)),
         "notes": batch["notes"],
+        "created_at": batch.get("created_at", ""),
+        "updated_at": (hist[-1]["ts"] if hist else batch.get("created_at", "")),
+        # why a failed batch failed — straight from the Agent's report, so
+        # the console can show it instead of only the Agent's terminal
+        "agent_errors": batch.get("agent_errors", []),
+        "agent_mode": batch.get("agent_mode", ""),
     }
 
 
