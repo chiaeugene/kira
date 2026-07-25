@@ -221,6 +221,27 @@ with st.sidebar.expander("Add masters"):
             except ValueError as e:
                 st.error(str(e))
 
+with st.sidebar.expander("Reset posted-history"):
+    st.caption(
+        "Kira remembers every line it has posted and blocks re-posting the "
+        "same ones (duplicate guard). If you deleted or cancelled "
+        "Kira-posted vouchers inside SQL Accounting and need to post those "
+        "lines again, reset the memory for that client here first."
+    )
+    rp_name = st.selectbox("Client", clients, key="rp_client_name")
+    if st.button("Reset duplicate guard", key="rp_btn"):
+        if REMOTE:
+            res = api.clear_posted_registry(rp_name)
+            n_cleared = res.get("cleared", 0)
+        else:
+            _reg = PostedRegistry(client_dir(rp_name))
+            n_cleared = len(_reg.keys)
+            _reg.keys = set()
+            _reg.path.parent.mkdir(parents=True, exist_ok=True)
+            _reg.path.write_text("[]", encoding="utf-8")
+        st.success(f"Cleared {n_cleared} remembered line(s) for {rp_name} — "
+                   "the same lines can be posted again now.")
+
 with st.sidebar.expander("Remove a client"):
     st.caption("Irreversible — deletes this client's master data, learned "
               "rules, and audit trail.")

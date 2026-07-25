@@ -324,6 +324,14 @@ def _post_one(app, inv: dict) -> None:
             _set_first(main, ("DocNo",), inv["doc_no"])
         except RuntimeError:
             pass  # leave auto-numbering in charge
+    if doc_type == "journal":
+        # Header description, so the voucher list reads like an
+        # accountant's own entries ('SALARY - JUN'26') instead of blank.
+        try:
+            _set_first(main, ("Description",),
+                       f"DAILY TAKINGS {inv['doc_date']}")
+        except RuntimeError:
+            pass
 
     if doc_type in HEADER_ONLY_TYPES:
         # Payments: header-level amount + which bank/cash it moved through.
@@ -368,22 +376,41 @@ def _post_one(app, inv: dict) -> None:
                     f"zero (off by RM {abs(off):,.2f}) — refusing to post "
                     "an unbalanced entry (fix it in the console and "
                     "re-approve)")
-        for line in inv["lines"]:
+        def _journal_line(account: str, description: str, amount: float,
+                          debit: bool) -> None:
+            """One detail row: amount into DR or CR AND its LOCALDR/LOCALCR
+            twin (SQL Account is multi-currency internally; 'local' is the
+            MYR side - 2026-07-25 field bug: setting only DR/CR produced
+            zero-amount vouchers, headers saved but every figure 0.00).
+            Then READ THE AMOUNT BACK - if it didn't stick, refuse to save,
+            because a voucher full of zeros in a live ledger is worse than
+            a failed batch."""
             detail.Append()
-            amt = line["amount"]
-            _set_first(detail, ("Account", "AccNo", "Code"), line["account_code"])
-            _set_first(detail, ("Description",), line["description"])
-            _set_first(detail, ("DR", "Debit") if amt >= 0 else ("CR", "Credit"),
-                       abs(amt), kind="float")
+            _set_first(detail, ("Account", "AccNo", "Code"), account)
+            _set_first(detail, ("Description",), description)
+            names = ("DR", "Debit", "LOCALDR") if debit else \
+                    ("CR", "Credit", "LOCALCR")
+            actual = _set_first(detail, names[:2], amount, kind="float")
+            try:
+                _set_first(detail, (names[2],), amount, kind="float")
+            except RuntimeError:
+                pass  # single-currency installs may not expose the twin
+            got = detail.FindField(actual).Value
+            if abs(float(got or 0) - amount) > 0.01:
+                raise ValueError(
+                    f"amount did not stick: wrote {amount} to {actual}, "
+                    f"read back {got!r} - refusing to save a zero/garbled "
+                    "voucher (field mapping needs adjusting for this SQL "
+                    "version)")
             detail.Post()
+
+        for line in inv["lines"]:
+            amt = line["amount"]
+            _journal_line(line["account_code"], line["description"],
+                          abs(amt), debit=amt >= 0)
             if line["contra_account"]:
-                detail.Append()
-                _set_first(detail, ("Account", "AccNo", "Code"),
-                           line["contra_account"])
-                _set_first(detail, ("Description",), line["description"])
-                _set_first(detail, ("CR", "Credit") if amt >= 0 else ("DR", "Debit"),
-                           abs(amt), kind="float")
-                detail.Post()
+                _journal_line(line["contra_account"], line["description"],
+                              abs(amt), debit=amt < 0)
     else:
         for line in inv["lines"]:
             detail.Append()

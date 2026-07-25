@@ -312,6 +312,14 @@ assert _slugify("Maju Jaya Enterprise Sdn Bhd") == "MAJU_JAYA_ENTERPRISE_SDN_BHD
 assert _slugify("  weird!! name--123  ") == "WEIRD_NAME_123"
 print("[wizard] _slugify produces valid client-name strings")
 
+# 8e. duplicate-guard reset: after deleting Kira-posted vouchers in SQL,
+# the same lines must be postable again.
+r = api.post("/api/clients/DEMO_CLIENT/registry/clear", headers=FIRM)
+assert r.status_code == 200 and r.json()["cleared"] > 0, r.text
+r = api.post("/api/clients/DEMO_CLIENT/registry/clear", headers=AGENT)
+assert r.status_code == 401, "registry clear is firm-only"
+print(f"[registry-clear] duplicate guard reset; agent token rejected  OK")
+
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()
 print(f"[overview] queue: {ov['queue']}")

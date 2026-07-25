@@ -217,7 +217,7 @@ class _FakeDataSet:
     # SQL Accounting install is CASE-SENSITIVE, so this fake must be too, or
     # it would mask the exact bug that just hit production.
     REAL_FIELDS = ("DOCDATE", "POSTDATE", "DOCNO", "CODE", "DESCRIPTION",
-                  "DR", "CR")
+                  "DR", "CR", "LOCALDR", "LOCALCR")
 
     def __init__(self):
         self.queried: list[str] = []
@@ -293,6 +293,37 @@ assert "DOCDATE" in biz.main.queried, \
 assert isinstance(biz.main.fields["DOCDATE"].stored, dt.datetime), \
     f"doc date must arrive as a datetime, got {type(biz.main.fields['DOCDATE'].stored)}"
 assert biz.main.fields["DOCDATE"].stored == dt.datetime(2026, 7, 1)
+# Amounts land in BOTH DR/CR and their LOCAL twins (2026-07-25 field bug:
+# only DR/CR were written and every voucher saved with all figures 0.00).
+assert biz.detail.fields["CR"].stored == 147.2
+assert biz.detail.fields["LOCALCR"].stored == 147.2, \
+    "LOCALCR (the MYR side) must be written too"
+assert biz.detail.fields["DR"].stored == 147.2  # cash side of the same pair
+assert biz.detail.fields["LOCALDR"].stored == 147.2
+print("[poster] amounts written to DR/CR AND LOCALDR/LOCALCR  OK")
+
+# Silent-zero guard: a field that accepts the write but stores 0 (what the
+# real install did) must make posting REFUSE, not save a zero voucher.
+class _ZeroingField(_FakeField):
+    @property
+    def Value(self):
+        return 0.0
+
+    @Value.setter
+    def Value(self, v):
+        self.stored = 0.0  # accepted, silently zeroed
+
+
+biz_zero = _FakeBiz()
+for n in ("DR", "CR", "LOCALDR", "LOCALCR"):
+    biz_zero.main.fields[n] = _ZeroingField()
+    biz_zero.detail.fields[n] = _ZeroingField()
+try:
+    _post_one(_FakeApp(biz_zero), journal_inv)
+    raise AssertionError("must refuse to save when the amount reads back 0")
+except ValueError as e:
+    assert "did not stick" in str(e), e
+print("[poster] silently-zeroed amount -> post refused, no zero voucher  OK")
 assert "DOCNO" not in biz.main.queried, \
     f"journal must NOT write its internal grouping key to SQL's DocNo, queried={biz.main.queried}"
 assert "CODE" in biz.detail.queried, "journal detail account must use CODE (confirmed field name)"

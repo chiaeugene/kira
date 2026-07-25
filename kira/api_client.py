@@ -115,3 +115,8 @@ class KiraAPI:
 
     def history(self, client: str) -> dict:
         return self._get(f"/api/clients/{client}/history")
+
+    def clear_posted_registry(self, client: str) -> dict:
+        """Reset the duplicate-post guard — use after deleting Kira-posted
+        vouchers inside SQL Accounting so the same lines can post again."""
+        return self._post(f"/api/clients/{client}/registry/clear", {})

@@ -494,6 +494,23 @@ def _json_records(df: pd.DataFrame) -> list[dict]:
     return json.loads(df.to_json(orient="records")) if not df.empty else []
 
 
+@app.post("/api/clients/{client}/registry/clear",
+          dependencies=[Depends(firm_auth)])
+def clear_posted_registry(client: str):
+    """Reset the duplicate-post guard for a client. Needed when posted
+    entries were deleted/cancelled inside SQL Accounting (e.g. the
+    zero-amount vouchers from the 2026-07-25 posting bug) and the same
+    lines must legitimately be posted again - otherwise DUP_POSTED blocks
+    the redo forever."""
+    _require_client(client)
+    reg = PostedRegistry(client_dir(client))
+    n = len(reg.keys)
+    reg.keys = set()
+    reg.path.parent.mkdir(parents=True, exist_ok=True)
+    reg.path.write_text("[]", encoding="utf-8")
+    return {"client": client, "cleared": n}
+
+
 @app.get("/api/clients/{client}/history", dependencies=[Depends(firm_auth)])
 def client_history(client: str):
     _require_client(client)
