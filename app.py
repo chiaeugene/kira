@@ -927,6 +927,8 @@ if page == "Client history":
     else:
         log = audit.read()
         stats = audit.stats()
+        if not log.empty and "ts" in log.columns:
+            log = log.sort_values("ts", ascending=False)  # newest first
         batches_log = (log[log["event"] == "batch_posted"]
                        if not log.empty else pd.DataFrame())
         corrections = (log[log["event"] == "correction"]

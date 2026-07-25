@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 
+from .clock import now_str
 
 class FileLog:
     def __init__(self, data_dir: str | Path):
@@ -33,7 +34,7 @@ class FileLog:
         self.entries[self.digest(data)] = {
             "file": filename,
             "channel": channel,
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "ts": now_str(),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.entries, indent=2, ensure_ascii=False),

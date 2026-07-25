@@ -157,6 +157,43 @@ def _fuzzy_party(name: str, master: pd.DataFrame) -> tuple[str, float]:
     return (best_code, best_score) if best_score >= 0.75 else ("", best_score)
 
 
+def harmonize_categories(out: pd.DataFrame) -> pd.DataFrame:
+    """Same category, same account — within one batch.
+
+    Party-less category lines (daily-takings splits: 'BEER', 'CASH SALES',
+    'SST 6%'...) are classified in independent 20-row chunks, and the AI
+    can legitimately waver between plausible accounts across chunks — the
+    first live batch coded BEER to 500-000 on some days and 610-P01 on
+    others (2026-07-25). An accountant would never do that: one category
+    posts to one account. Majority vote per (doc_type, DESCRIPTION) among
+    party-less lines; overridden lines are marked so the reviewer can see
+    what changed and confidence drops to medium (a human should glance).
+    """
+    mask = ((out["supplier"].astype(str).str.strip() == "")
+            & (out["description"].astype(str).str.strip() != "")
+            & (out["account_code"].astype(str).str.strip() != ""))
+    if not mask.any():
+        return out
+    key = (out.loc[mask, "doc_type"].astype(str) + "|"
+           + out.loc[mask, "description"].astype(str).str.strip().str.upper())
+    for k in key.unique():
+        idxs = key[key == k].index
+        codes = out.loc[idxs, "account_code"].astype(str)
+        if codes.nunique() <= 1:
+            continue
+        winner = codes.mode().iloc[0]
+        losers = [i for i in idxs if out.loc[i, "account_code"] != winner]
+        for i in losers:
+            was = out.loc[i, "account_code"]
+            out.loc[i, "account_code"] = winner
+            out.loc[i, "confidence"] = "medium"
+            out.loc[i, "reason"] = (
+                f"harmonized: AI chose {was} here but {winner} for the same "
+                f"category elsewhere in this batch — majority wins, please "
+                "confirm")
+    return out
+
+
 def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
              model: str = "claude-opus-4-8", batch_size: int = 20,
              max_tokens: int = 16000) -> pd.DataFrame:
@@ -228,7 +265,7 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
                 res.get("contra_account", ""), res["tax_code"]]
             out.loc[i, ["confidence", "source", "reason"]] = [
                 res["confidence"], "llm", res["reason"]]
-        return out
+        return harmonize_categories(out)
 
     # Pass 3 — offline heuristic fallback (no API credentials)
     for i in pending:

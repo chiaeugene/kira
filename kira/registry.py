@@ -13,6 +13,7 @@ import shutil
 import time
 from pathlib import Path
 
+from .clock import now_str
 from .audit import AuditLog
 from .context import (ClientContext, load_client_context,
                       parse_master_upload)
@@ -88,7 +89,7 @@ def register_client(name: str, base: str | Path = "client_data",
     meta_path = d / "kira_meta.json"
     meta_path.write_text(json.dumps({
         "discovered_via": "agent",
-        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "created_at": now_str(),
         **meta,
     }, indent=2, ensure_ascii=False), encoding="utf-8")
     return True

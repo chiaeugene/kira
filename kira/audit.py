@@ -15,13 +15,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from .clock import now_str
 
 class AuditLog:
     def __init__(self, data_dir: str | Path):
         self.path = Path(data_dir) / "audit.jsonl"
 
     def _write(self, event: dict) -> None:
-        event = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **event}
+        event = {"ts": now_str(), **event}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")

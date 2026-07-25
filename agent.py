@@ -140,6 +140,13 @@ def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
         "mode": result["mode"],
         "invoices": result.get("invoices", 0),
         "errors": [str(e) for e in result.get("errors", [])],
+        # WHICH documents made it in, even when the batch as a whole
+        # failed - the cloud records these in the duplicate guard so a
+        # partially-posted batch can never double-post its succeeded
+        # documents on a re-approve.
+        "posted": [{"supplier_code": p.get("supplier_code", ""),
+                    "doc_no": p.get("doc_no", "")}
+                   for p in result.get("posted", [])],
     })
     rep.raise_for_status()
     log.info("BATCH %s  %s | %s invoice(s) | mode %s",

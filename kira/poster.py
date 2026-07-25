@@ -38,6 +38,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .clock import stamp
 
 @dataclass
 class SQLConfig:
@@ -163,7 +164,7 @@ def post_batch(df: pd.DataFrame, cfg: SQLConfig,
     demo runs surface the DUP_POSTED check) — delete posted_registry.json to reset.
     """
     invoices = _rows_to_invoices(df)
-    ts = time.strftime("%Y%m%d_%H%M%S")
+    ts = stamp()
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

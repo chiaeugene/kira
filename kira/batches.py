@@ -20,6 +20,7 @@ import uuid
 from pathlib import Path
 
 import pandas as pd
+from .clock import now_str, today_str
 
 STATES = ("review", "approved", "dispatched", "posted", "failed", "rejected")
 
@@ -85,16 +86,16 @@ class BatchStore:
                rows: pd.DataFrame, issues: pd.DataFrame,
                notes: list[str]) -> dict:
         batch = {
-            "id": f"b_{time.strftime('%Y%m%d')}_{uuid.uuid4().hex[:8]}",
+            "id": f"b_{today_str()}_{uuid.uuid4().hex[:8]}",
             "client": client,
             "state": "review",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "created_at": now_str(),
             "source_files": source_files,
             "notes": notes,
             "rows": rows_to_records(rows),
             "issues": issues.to_dict(orient="records"),
             "total_rm": round(float(rows["amount"].sum()), 2),
-            "history": [{"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "history": [{"ts": now_str(),
                          "state": "review"}],
         }
         self._save(batch)
@@ -128,7 +129,7 @@ class BatchStore:
             raise KeyError(batch_id)
         batch["state"] = new_state
         batch.update(extra)
-        batch["history"].append({"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        batch["history"].append({"ts": now_str(),
                                  "state": new_state, **{k: v for k, v in extra.items()
                                                         if k in ("agent", "error_count")}})
         self._save(batch)

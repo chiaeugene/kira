@@ -36,6 +36,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, UploadFile
 from starlette.concurrency import run_in_threadpool
 
+from kira.clock import now_str
 from kira.batches import (BatchStore, ensure_row_ids, records_to_df,
                           source_channel)
 from kira.classify import classify
@@ -310,7 +311,7 @@ def _record_heartbeat(body: dict) -> None:
               if AGENTS_STATUS.exists() else {})
     name = body.get("agent_name", "agent")
     agents[name] = {
-        "last_seen": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "last_seen": now_str(),
         "clients": body.get("clients", []),
         "modes": body.get("modes", {}),
     }
@@ -355,8 +356,25 @@ def agent_report(body: dict):
         PostedRegistry(client_dir(b["client"])).record(rows)
         state = store.transition(bid, "posted", agent_mode=body.get("mode", "?"))
     else:
+        # Partial-posting protection: some documents may have gone into SQL
+        # before the batch failed. Record THOSE rows in the duplicate guard
+        # now, or a re-approve of the (rightly) failed batch would post the
+        # succeeded documents a second time — double entries in a live
+        # ledger. Old agents that don't report 'posted' simply skip this.
+        posted_pairs = {(str(p.get("supplier_code", "")),
+                         str(p.get("doc_no", "")))
+                        for p in body.get("posted", [])}
+        if posted_pairs:
+            rows = records_to_df(b["rows"])
+            mask = rows.apply(
+                lambda r: (str(r.get("supplier_code", "") or ""),
+                           str(r.get("doc_no", "") or "")) in posted_pairs,
+                axis=1)
+            if mask.any():
+                PostedRegistry(client_dir(b["client"])).record(rows[mask])
         state = store.transition(bid, "failed", error_count=len(errors),
-                                 agent_errors=errors)
+                                 agent_errors=errors,
+                                 posted_before_failure=len(posted_pairs))
     audit.log_batch(", ".join(b["source_files"]),
                     {"mode": f"agent:{body.get('mode', '?')}",
                      "invoices": body.get("invoices", 0),
@@ -482,7 +500,7 @@ def sync_masters_endpoint(client: str, body: dict):
     meta_path = client_dir(client) / "kira_meta.json"
     meta = (json.loads(meta_path.read_text(encoding="utf-8"))
             if meta_path.exists() else {})
-    meta["masters_synced_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    meta["masters_synced_at"] = now_str()
     meta["masters_synced_by"] = str(body.get("agent_name", ""))
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     counts = {f: len(masters[f]) for f in saved}
@@ -516,6 +534,10 @@ def client_history(client: str):
     _require_client(client)
     _ctx, rules, audit = open_client(client)
     log = audit.read()
+    # newest first — the audit file is append-order (oldest first), which
+    # read as "not according to timestamp" in the console (field feedback)
+    if not log.empty and "ts" in log.columns:
+        log = log.sort_values("ts", ascending=False)
     batches_log = (_json_records(log[log["event"] == "batch_posted"])
                    if not log.empty else [])
     corrections = (_json_records(log[log["event"] == "correction"])
