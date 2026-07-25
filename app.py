@@ -349,6 +349,15 @@ with tab_batch:
     if show_hero:
         ui.features()
 
+    # Ticking "Re-ingest anyway" AFTER a duplicate-file refusal must retry
+    # immediately, not require a separate click — a cached failure result
+    # would otherwise sit there forever since the upload block below only
+    # fires when no result is cached yet.
+    _stale = st.session_state.get("upload_result")
+    if (force_reingest and _stale
+            and any("DUPLICATE FILE" in n for n in _stale.get("notes", []))):
+        del st.session_state["upload_result"]
+
     # ---- REMOTE: server does everything; review happens in the Inbox ----
     if REMOTE and uploads and "upload_result" not in st.session_state:
         with st.spinner("Uploading — Kira Cloud is reading and coding…"):
