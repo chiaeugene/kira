@@ -54,6 +54,10 @@ DOC_TYPE_TO_SQL = {
     "purchase_return": "PH_CN",
     "sale": "SL_IV",
     "sales_return": "SL_CN",
+    "cash_sale": "SL_CS",   # daily takings per the accountant's ruling
+                            # (2026-07-26): NOT GL_JE — auditors treat JVs
+                            # as adjustments needing support documents, and
+                            # SST only auto-computes on sales documents
     "customer_payment": "AR_PM",
     "supplier_payment": "AP_PM",
     "journal": "GL_JE",
