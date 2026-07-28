@@ -117,6 +117,7 @@ def _rows_to_invoices(df: pd.DataFrame) -> list[dict]:
                     "amount": float(r["amount"]),
                     "tax_code": str(r["tax_code"]),
                     "tax_amount": float(r.get("tax", 0.0) or 0.0),
+                    "tax_rate": float(r.get("tax_rate", 0.0) or 0.0),
                     "contra_account": str(r.get("contra_account", "") or ""),
                 }
                 for _, r in g.iterrows()
@@ -151,7 +152,8 @@ class PostedRegistry:
     def record(self, df: pd.DataFrame) -> None:
         for _, r in df.iterrows():
             dtp = str(r.get("doc_type", "") or "purchase")
-            extra = str(r.get("description", "")) if dtp == "journal" else ""
+            extra = (str(r.get("description", ""))
+                     if dtp in ("journal", "cash_sale") else "")
             self.keys.add(self.key(r["supplier_code"], r.get("doc_no", ""),
                                    r["amount"], dtp, extra))
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,12 +326,12 @@ def _post_one(app, inv: dict) -> None:
     # synthetic TAKINGS-YYYYMMDD tag a daily-takings sheet gets split under),
     # never a real journal voucher number — SQL auto-numbers these instead,
     # matching how an accountant's manually-keyed entries already look.
-    if inv["doc_no"] and doc_type != "journal":
+    if inv["doc_no"] and doc_type not in ("journal", "cash_sale"):
         try:
             _set_first(main, ("DocNo",), inv["doc_no"])
         except RuntimeError:
             pass  # leave auto-numbering in charge
-    if doc_type == "journal":
+    if doc_type in ("journal", "cash_sale"):
         # Header description, so the voucher list reads like an
         # accountant's own entries ('SALARY - JUN'26') instead of blank.
         try:
@@ -419,10 +421,18 @@ def _post_one(app, inv: dict) -> None:
     else:
         for line in inv["lines"]:
             detail.Append()
-            # invoice-style documents (PH_PI, PH_CN, SL_IV, SL_CN)
+            # invoice-style documents (PH_PI, PH_CN, SL_IV, SL_CN, SL_CS)
             _set_first(detail, ("Account", "ItemCode"), line["account_code"])
             _set_first(detail, ("Description",), line["description"])
-            _set_first(detail, ("UnitPrice", "Amount"), line["amount"], kind="float")
+            actual = _set_first(detail, ("UnitPrice", "Amount"),
+                                line["amount"], kind="float")
+            got = detail.FindField(actual).Value
+            if abs(float(got or 0) - line["amount"]) > 0.01:
+                raise ValueError(
+                    f"amount did not stick: wrote {line['amount']} to "
+                    f"{actual}, read back {got!r} - refusing to save a "
+                    "zero/garbled document (same guard that caught the "
+                    "zero-voucher bug on journals)")
             try:
                 _set_first(detail, ("Qty",), 1, kind="float")
             except RuntimeError:
@@ -432,6 +442,16 @@ def _post_one(app, inv: dict) -> None:
                     _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
                 except RuntimeError:
                     pass
+                # Cash sales (accountant's template): the tax code plus an
+                # explicit RATE per line - SQL computes the SST amount from
+                # these; our sheet's SST figure is validated upstream as the
+                # cross-check (CASH_SALE_CONTROL_MISMATCH), never typed in.
+                if line.get("tax_rate"):
+                    try:
+                        _set_first(detail, ("TaxRate",), line["tax_rate"],
+                                   kind="float")
+                    except RuntimeError:
+                        pass
             detail.Post()
 
     biz.Save()

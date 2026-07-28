@@ -35,8 +35,9 @@ def source_channel(batch: dict) -> str:
     return "upload"
 
 ROW_COLS = ["row_id", "doc_type", "date", "supplier", "description", "amount",
-            "tax", "doc_no", "supplier_code", "account_code", "tax_code",
-            "contra_account", "confidence", "source", "reason",
+            "tax", "tax_rate", "doc_no", "supplier_code", "account_code",
+            "tax_code", "contra_account", "control_total",
+            "confidence", "source", "reason",
             "doc_type_hint", "source_row"]
 
 
@@ -70,6 +71,9 @@ def records_to_df(records: list[dict]) -> pd.DataFrame:
             df[c] = df[c].fillna("").astype(str)
         else:
             df[c] = ""
+    for c in ("tax_rate", "control_total"):  # cash-sale extras; legacy = 0
+        df[c] = (pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+                 if c in df.columns else 0.0)
     df["doc_type"] = df["doc_type"].replace("", "purchase")  # legacy batches
     return df
 

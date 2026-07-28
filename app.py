@@ -85,7 +85,8 @@ EDITABLE = ["doc_type", "date", "supplier", "description", "amount", "tax",
             "doc_no", "supplier_code", "account_code", "contra_account",
             "tax_code"]
 DOC_TYPE_OPTIONS = ["purchase", "purchase_return", "sale", "sales_return",
-                    "customer_payment", "supplier_payment", "journal"]
+                    "cash_sale", "customer_payment", "supplier_payment",
+                    "journal"]
 
 # ---------- sidebar ----------
 ui.sidebar_brand()

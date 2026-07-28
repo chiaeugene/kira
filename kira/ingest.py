@@ -251,22 +251,83 @@ def _find_daily_takings_layout(headers: list) -> dict | None:
             "payment": payment_idx, "net_total": net_idx}
 
 
+_TAX_COL_RE = re.compile(r"(sst|gst|tax).*?(\d+(?:\.\d+)?)\s*%", re.IGNORECASE)
+_CASH_COL_RE = re.compile(r"cash", re.IGNORECASE)
+
+
+def _pair_tax_columns(body: pd.DataFrame, headers: list,
+                      revenue_idx: list[int], mid_idx: list[int]
+                      ) -> tuple[dict[int, tuple[int, float]], list[int]]:
+    """Match each 'SST X%' column to the revenue column it taxes, by
+    arithmetic: the revenue column where revenue * X% equals the tax value
+    on (almost) every day. The Voice's sheet: SST 6% is exactly 6% of
+    BEVERAGES & FOOD and SST 8% exactly 8% of BEER, every single day.
+    Returns ({revenue_idx: (tax_col_idx, rate)}, leftover_mid_idx)."""
+    pairs: dict[int, tuple[int, float]] = {}
+    leftover = list(mid_idx)
+    for t_idx in mid_idx:
+        m = _TAX_COL_RE.search(str(headers[t_idx]))
+        if not m:
+            continue
+        rate = float(m.group(2))
+        best, best_hits = None, 0
+        for r_idx in revenue_idx:
+            hits = checks = 0
+            for _, row in body.iterrows():
+                tax_v = _clean_amount(row.iloc[t_idx])
+                rev_v = _clean_amount(row.iloc[r_idx])
+                if not tax_v or not rev_v:
+                    continue
+                checks += 1
+                if abs(rev_v * rate / 100 - tax_v) <= 0.02:
+                    hits += 1
+            if checks and hits > best_hits and hits >= checks * 0.8:
+                best, best_hits = r_idx, hits
+        if best is not None and best not in pairs:
+            pairs[best] = (t_idx, rate)
+            leftover.remove(t_idx)
+    return pairs, leftover
+
+
 def _parse_daily_takings(raw: pd.DataFrame, header_row: int,
                          layout: dict) -> pd.DataFrame:
-    """Split each day's wide row into balanced journal lines: revenue and
-    tax/service/rounding columns credited (their real GL account, once the
-    AI matches the description against the client's chart of accounts),
-    payment-method columns debited (cash, e-wallet, card...). No single
-    account_code/contra_account pair could represent this correctly — the
-    lines instead share one doc_no per day and must net to ~zero as a group
-    (see kira/validate.py's group-balance check and kira/poster.py's
-    multi-line journal posting)."""
+    """Split each day's wide row into ONE Cash Sales document per day,
+    exactly the way the client's accountant keys it by hand (worked example
+    on video, 2026-07-26 — her ruling: daily takings must go through
+    Sales > Cash Sales, never GL journal, because SST auto-computes from
+    tax codes on sales documents and auditors treat JVs as adjustments):
+
+      - each revenue column is a POSITIVE line; a matching 'SST X%' column
+        becomes that line's tax rate + expected tax amount (SQL recomputes
+        it from the tax code — our figure is the cross-check, never typed);
+      - service charge / rounding etc. are lines with their sheet sign;
+      - each NON-cash payment column is a NEGATIVE line (money that left
+        the cash drawer into a wallet/card/bank account);
+      - the CASH column is NOT a line — it is the document's residual Net
+        Total, carried on every row as control_total so validation can
+        verify sum(lines + tax) == cash before anything posts."""
     headers = list(raw.iloc[header_row])
     body = raw.iloc[header_row + 1:].reset_index(drop=True)
     date_idx = layout["date"]
+    tax_pairs, other_mid = _pair_tax_columns(body, headers,
+                                             layout["revenue"], layout["mid"])
+    cash_idx = next((i for i in layout["payment"]
+                     if _CASH_COL_RE.search(str(headers[i]))), None)
+    noncash_idx = [i for i in layout["payment"] if i != cash_idx]
+
     rows: list[dict] = []
     net_totals: list[float] = []
-    payment_total = 0.0
+    cash_total = 0.0
+
+    def emit(date, source_row, desc, amount, tax=0.0, tax_rate=0.0,
+             control=0.0):
+        rows.append({
+            "date": date, "supplier": "", "description": desc,
+            "amount": round(amount, 2), "tax": round(tax, 2),
+            "tax_rate": tax_rate, "control_total": round(control, 2),
+            "doc_no": f"TAKINGS-{date:%Y%m%d}",
+            "doc_type_hint": "cash_sale", "source_row": source_row,
+        })
 
     for i, row in body.iterrows():
         lead = str(row.iloc[0]).strip() if len(row) else ""
@@ -279,44 +340,43 @@ def _parse_daily_takings(raw: pd.DataFrame, header_row: int,
         day_net = _clean_amount(row.iloc[layout["net_total"]])
         if day_net:
             net_totals.append(day_net)
-        # credit side: revenue categories + tax/service/rounding adjustments
-        for idx in layout["revenue"] + layout["mid"]:
+        day_cash = (_clean_amount(row.iloc[cash_idx]) or 0.0
+                    if cash_idx is not None else 0.0)
+        cash_total += day_cash
+
+        for idx in layout["revenue"]:
             val = _clean_amount(row.iloc[idx])
             if not val:
                 continue
-            rows.append({
-                "date": date, "supplier": "",
-                "description": _clean_str(headers[idx]),
-                "amount": round(-val, 2), "tax": 0.0,
-                "doc_no": f"TAKINGS-{date:%Y%m%d}",
-                "doc_type_hint": "journal",
-                "source_row": source_row,
-            })
-        # debit side: how the money was actually collected
-        for idx in layout["payment"]:
+            t_idx, rate = tax_pairs.get(idx, (None, 0.0))
+            tax_v = (_clean_amount(row.iloc[t_idx]) or 0.0) if t_idx else 0.0
+            emit(date, source_row, _clean_str(headers[idx]), val,
+                 tax=tax_v, tax_rate=rate, control=day_cash)
+        for idx in other_mid:
             val = _clean_amount(row.iloc[idx])
             if not val:
                 continue
-            payment_total += val
-            rows.append({
-                "date": date, "supplier": "",
-                "description": _clean_str(headers[idx]),
-                "amount": round(val, 2), "tax": 0.0,
-                "doc_no": f"TAKINGS-{date:%Y%m%d}",
-                "doc_type_hint": "journal",
-                "source_row": source_row,
-            })
+            emit(date, source_row, _clean_str(headers[idx]), val,
+                 control=day_cash)
+        for idx in noncash_idx:
+            val = _clean_amount(row.iloc[idx])
+            if not val:
+                continue
+            emit(date, source_row, _clean_str(headers[idx]), -abs(val),
+                 control=day_cash)
 
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    # Reconciliation reuses the same mechanism as the standard parser: the
-    # sheet's own NET TOTAL column, summed, is the "declared" figure; the
-    # money-collected side is the "parsed" figure. Tracked during the loop,
-    # NOT inferred from amount>0 afterwards — a negated ROUNDING value can
-    # also land positive and would silently double-count otherwise.
-    df.attrs["declared_totals"] = [round(sum(net_totals), 2)] if net_totals else []
-    df.attrs["parsed_total"] = round(payment_total, 2)
+    # Reconciliation vs the book's own figures: every day must satisfy
+    # sum(line amounts + expected tax) == that day's CASH column; summed
+    # over the sheet that means parsed == sum of cash. NET TOTAL is the
+    # declared figure when there is no cash column to check against.
+    df.attrs["declared_totals"] = ([round(cash_total, 2)] if cash_idx is not None
+                                   else ([round(sum(net_totals), 2)]
+                                         if net_totals else []))
+    df.attrs["parsed_total"] = round(
+        float((df["amount"] + df["tax"]).sum()), 2)
     return df
 
 

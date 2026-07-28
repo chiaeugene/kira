@@ -39,8 +39,12 @@ class Issue:
     row_id: int = -1  # batch-unique line id (targeting); -1 if unavailable
 
 
-CUSTOMER_SIDE = ("sale", "sales_return", "customer_payment")
+CUSTOMER_SIDE = ("sale", "sales_return", "cash_sale", "customer_payment")
 PAYMENT_TYPES = ("customer_payment", "supplier_payment")
+# doc types whose lines carry no distinguishing party of their own — the
+# line DESCRIPTION joins the duplicate key (two categories can share the
+# same amount on the same day, e.g. cash and card both RM162.85)
+DESC_KEYED_TYPES = ("journal", "cash_sale")
 
 
 def dup_key(supplier_code: str, doc_no: str, amount: float,
@@ -118,6 +122,32 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
     jg = journal_balanced_groups(df)
     flagged_unbalanced: set[str] = set()
 
+    # --- cash-sale day groups must reconcile to the book's own CASH figure:
+    # sum(line amounts + expected tax) == that day's cash column (carried on
+    # every row as control_total by kira/ingest.py). The accountant's method
+    # makes cash the document's residual Net Total — if this doesn't match,
+    # a column was misread and NOTHING may post.
+    if "doc_type" in df.columns:
+        cs_mask = df["doc_type"].fillna("").astype(str) == "cash_sale"
+        if cs_mask.any() and "control_total" in df.columns:
+            for g, grp in df.loc[cs_mask].groupby(
+                    df.loc[cs_mask, "doc_no"].fillna("").astype(str)):
+                if not g:
+                    continue
+                ctrl = float(pd.to_numeric(grp["control_total"],
+                                           errors="coerce").fillna(0).iloc[0])
+                total = float((grp["amount"]
+                               + pd.to_numeric(grp.get("tax", 0),
+                                               errors="coerce").fillna(0)).sum())
+                if abs(total - ctrl) > 0.02:
+                    issues.append(Issue(
+                        SEV_ERROR, "CASH_SALE_CONTROL_MISMATCH",
+                        int(grp["source_row"].iloc[0]),
+                        f"This day's lines total RM {total:,.2f} but the "
+                        f"book says cash was RM {ctrl:,.2f} — a column was "
+                        "misread; refusing until they reconcile.",
+                        rid(grp.iloc[0])))
+
     # --- duplicates inside the batch ---
     seen: dict[str, int] = {}
     for _, row in df.iterrows():
@@ -126,7 +156,7 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
         # different categories can coincidentally share the same amount on
         # the same day (e.g. cash and card both RM162.85) — description is
         # what actually distinguishes them, so it joins the key for those.
-        extra = str(row.get("description", "")) if dtp == "journal" else ""
+        extra = str(row.get("description", "")) if dtp in DESC_KEYED_TYPES else ""
         key = dup_key(row.get("supplier_code", ""), row.get("doc_no", ""),
                       row["amount"], dtp, extra)
         alt = dup_key(row.get("supplier", ""), row.get("date", ""),
@@ -163,7 +193,7 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
             dtp = "purchase"
 
         # --- against posted history ---
-        posted_extra = str(row.get("description", "")) if dtp == "journal" else ""
+        posted_extra = str(row.get("description", "")) if dtp in DESC_KEYED_TYPES else ""
         if dup_key(s_code, row.get("doc_no", ""), amount, dtp, posted_extra) in posted_keys:
             add(SEV_ERROR, "DUP_POSTED", "Already posted previously for this client.")
 
@@ -227,7 +257,10 @@ def validate_batch(df: pd.DataFrame, ctx: ClientContext,
                 f"Tax code '{t_code}' is not in the tax code list.")
 
         # --- amount / tax sanity ---
-        if amount < 0:
+        if amount < 0 and dtp not in ("journal", "cash_sale"):
+            # journals: credits are negative by convention here; cash sales:
+            # non-cash payment methods are negative lines by the accountant's
+            # own template — neither is a suspected credit note.
             add(SEV_WARN, "NEGATIVE_AMOUNT", "Negative amount — is this a credit note?")
         if tax and abs(tax) >= abs(amount):
             add(SEV_ERROR, "TAX_EXCEEDS_AMOUNT",

@@ -34,7 +34,7 @@ from .context import ClientContext
 from .rules import RuleStore, normalize_supplier
 
 DOC_TYPES = ["purchase", "purchase_return", "sale", "sales_return",
-             "customer_payment", "supplier_payment", "journal"]
+             "cash_sale", "customer_payment", "supplier_payment", "journal"]
 
 SCHEMA = {
     "type": "object",
@@ -71,6 +71,12 @@ records into SQL Accounting. For each transaction line decide:
    - purchase_return: goods returned to a supplier / supplier credit note
    - sale: an invoice the business issued to its customer
    - sales_return: goods returned by a customer / credit note issued
+   - cash_sale: daily walk-in takings (POS/outlet summary) — one Cash Sales
+     document per day. Lines with a positive amount are revenue categories
+     or charges; lines with a NEGATIVE amount are how the money was
+     collected (e-wallet, card, bank transfer) and must be coded to that
+     payment method's BANK/CASH-type asset account. Cash itself is never a
+     line — it is the document's residual total.
    - customer_payment: money RECEIVED from a customer (receipt, collection)
    - supplier_payment: money PAID to a supplier (payment voucher)
    - journal: adjustments that fit none of the above
@@ -80,6 +86,8 @@ records into SQL Accounting. For each transaction line decide:
 2. party_code — the code of the party FROM THE CORRECT MASTER:
    suppliers/creditors for purchase, purchase_return, supplier_payment;
    customers/debtors for sale, sales_return, customer_payment.
+   For cash_sale: the walk-in / cash-sales customer code from the customer
+   master (there is usually exactly one, named like "CASH SALES").
    "" if no plausible match (a new party).
 
 3. account_code — the other side of the entry, FROM THE CHART OF ACCOUNTS ONLY:
@@ -139,7 +147,7 @@ def _classify_batch_llm(client, model: str, max_tokens: int,
 
 
 def _party_master(ctx: ClientContext, doc_type: str) -> pd.DataFrame:
-    if doc_type in ("sale", "sales_return", "customer_payment"):
+    if doc_type in ("sale", "sales_return", "cash_sale", "customer_payment"):
         return ctx.customers
     return ctx.suppliers
 
@@ -271,6 +279,21 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
     for i in pending:
         hint = str(out.loc[i, "doc_type_hint"] or "") or "purchase"
         out.loc[i, "doc_type"] = hint
+        if hint == "cash_sale":
+            # party is the walk-in cash customer, not a name on the line
+            cust = ctx.customers
+            code = ""
+            if cust is not None and not cust.empty:
+                cash_like = cust[cust["name"].str.upper()
+                                 .str.contains("CASH", na=False)]
+                code = str((cash_like if not cash_like.empty else cust)
+                           .iloc[0]["code"])
+            out.loc[i, "supplier_code"] = code
+            out.loc[i, ["confidence", "source"]] = ["low", "fallback"]
+            out.loc[i, "reason"] = ("offline fallback (cash_sale), walk-in "
+                                    "customer from master — set "
+                                    "ANTHROPIC_API_KEY for AI coding")
+            continue
         code, score = _fuzzy_party(out.loc[i, "supplier"],
                                    _party_master(ctx, hint))
         out.loc[i, "supplier_code"] = code
