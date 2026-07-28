@@ -318,10 +318,14 @@ def _post_one(app, inv: dict) -> None:
     if doc_type != "journal":
         _set_first(main, ("Code",), inv["supplier_code"])
     _set_first(main, ("DocDate",), inv["doc_date"], kind="date")
-    try:
-        _set_first(main, ("PostDate",), inv["doc_date"], kind="date")
-    except RuntimeError:
-        pass
+    for extra_date in ("PostDate", "TaxDate"):
+        # TAXDATE especially: left unset it can default into a CLOSED SST
+        # period — 'SST Return (01 May to 30 Jun) already processed, insert
+        # is not allowed' killed a July document (2026-07-28 field bug).
+        try:
+            _set_first(main, (extra_date,), inv["doc_date"], kind="date")
+        except RuntimeError:
+            pass
     # Journals: doc_no here is our own internal grouping key (e.g. the
     # synthetic TAKINGS-YYYYMMDD tag a daily-takings sheet gets split under),
     # never a real journal voucher number — SQL auto-numbers these instead,
@@ -437,22 +441,61 @@ def _post_one(app, inv: dict) -> None:
                 _set_first(detail, ("Qty",), 1, kind="float")
             except RuntimeError:
                 pass
+            # Tax is ALWAYS set explicitly - code+rate on taxed lines, and
+            # EXPLICITLY CLEARED on untaxed ones. SQL Accounting carries the
+            # previous line's tax onto each new line (visible in the
+            # accountant's own video: a fresh row appears pre-filled
+            # 'SV 8%'); leaving untaxed lines untouched let the negative
+            # payment lines inherit tax, which drove document totals
+            # negative and failed the C.O.D. payment check - and silently
+            # CORRUPTED the documents that happened to stay positive
+            # (2026-07-28 field bug, 6 wrong documents saved).
             if line["tax_code"]:
-                try:
-                    _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
-                except RuntimeError:
-                    pass
-                # Cash sales (accountant's template): the tax code plus an
-                # explicit RATE per line - SQL computes the SST amount from
-                # these; our sheet's SST figure is validated upstream as the
-                # cross-check (CASH_SALE_CONTROL_MISMATCH), never typed in.
+                _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
                 if line.get("tax_rate"):
                     try:
                         _set_first(detail, ("TaxRate",), line["tax_rate"],
                                    kind="float")
                     except RuntimeError:
                         pass
+            else:
+                try:
+                    _set_first(detail, ("Tax", "TaxType"), "")
+                except RuntimeError:
+                    pass
+                try:
+                    _set_first(detail, ("TaxRate",), 0, kind="float")
+                except RuntimeError:
+                    pass
+            try:
+                _set_first(detail, ("TaxInclusive",), 0, kind="float")
+            except RuntimeError:
+                pass
             detail.Post()
+            # Verify what SQL actually computed for tax against the book's
+            # own SST figure (the sheet is the ground truth). Catches BOTH
+            # a wrong tax code (rate recomputed differently) and inherited
+            # phantom tax - BEFORE anything is saved.
+            try:
+                got_tax = detail.FindField("TAXAMT").Value
+            except Exception:
+                got_tax = None
+            if got_tax is not None:
+                got_f = float(got_tax or 0)
+                expected = float(line.get("tax_amount", 0.0) or 0.0)
+                if expected == 0 and abs(got_f) > 0.02:
+                    raise ValueError(
+                        f"phantom tax on '{line['description']}': this line "
+                        f"has no tax in the book but SQL computed {got_f:.2f}"
+                        " (inherited from the previous line?) - refusing to "
+                        "save a corrupted document")
+                if expected > 0 and abs(got_f) > 0.02 \
+                        and abs(got_f - expected) > 0.02:
+                    raise ValueError(
+                        f"tax mismatch on '{line['description']}': SQL "
+                        f"computed {got_f:.2f} from tax code "
+                        f"'{line['tax_code']}' but the book says "
+                        f"{expected:.2f} - wrong tax code? refusing to save")
 
     biz.Save()
 

@@ -184,6 +184,13 @@ class _FakeFields:
 
 
 class _FakeDataSet:
+    """Mirrors the REAL SL_CS behaviors that burned the first live run
+    (2026-07-28): Append() carries the previous line's TAX/TAXRATE onto the
+    new line (seen pre-filled 'SV 8%' in the accountant's video), and Post()
+    computes TAXAMT from the tax code's rate whenever TAX is set."""
+
+    TAX_CODE_RATES = {"SV": None}  # None = honour the line's TAXRATE
+
     def __init__(self, names):
         self.names = names
         self.Fields = _FakeFields(names)
@@ -198,16 +205,35 @@ class _FakeDataSet:
         return self.fields[name]
 
     def Append(self):
+        prev_tax = (self.fields.get("TAX").stored
+                    if "TAX" in self.fields else None)
+        prev_rate = (self.fields.get("TAXRATE").stored
+                     if "TAXRATE" in self.fields else None)
         self.fields = {n: _FakeField() for n in self.names}
+        # SQL Accounting's inheritance: the new line starts with the
+        # previous line's tax — the exact trap the poster must clear.
+        if "TAX" in self.fields and prev_tax:
+            self.fields["TAX"].stored = prev_tax
+            self.fields["TAXRATE"].stored = prev_rate
 
     def Post(self):
+        if "TAXAMT" in self.fields:
+            code = self.fields.get("TAX").stored if "TAX" in self.fields else None
+            if code:
+                fixed = self.TAX_CODE_RATES.get(code, 0.0)
+                rate = (self.fields["TAXRATE"].stored or 0.0
+                        if fixed is None else fixed)
+                amt = self.fields.get("UNITPRICE").stored or 0.0
+                self.fields["TAXAMT"].stored = round(amt * rate / 100, 2)
+            else:
+                self.fields["TAXAMT"].stored = 0.0
         self.posted_rows.append({n: f.stored for n, f in self.fields.items()
                                  if f.stored is not None})
 
 
 # exact field names from the live SL_CS dump (subset that matters)
-MAIN = ("DOCKEY", "DOCNO", "DOCDATE", "POSTDATE", "CODE", "DESCRIPTION",
-        "DOCAMT", "P_PAYMENTMETHOD", "P_AMOUNT")
+MAIN = ("DOCKEY", "DOCNO", "DOCDATE", "POSTDATE", "TAXDATE", "CODE",
+        "DESCRIPTION", "DOCAMT", "P_PAYMENTMETHOD", "P_AMOUNT")
 DETAIL = ("DTLKEY", "SEQ", "ACCOUNT", "DESCRIPTION", "QTY", "UNITPRICE",
           "AMOUNT", "TAX", "TAXRATE", "TAXAMT")
 
@@ -256,12 +282,75 @@ assert biz.main.fields["CODE"].stored == "300-C0001"
 assert isinstance(biz.main.fields["DOCDATE"].stored, dt.datetime)
 rows = biz.detail.posted_rows
 assert len(rows) == 7, len(rows)
+assert isinstance(biz.main.fields["TAXDATE"].stored, dt.datetime), \
+    "tax date must be set explicitly (unset -> closed-SST-period default)"
 beer = next(r for r in rows if r.get("UNITPRICE") == 980.0)
 assert beer["TAX"] == "SV" and beer["TAXRATE"] == 8.0
-cxm = next(r for r in rows if r.get("UNITPRICE") == -539.95)
-assert "TAX" not in cxm, "payment lines carry no tax code"
-assert abs(sum(r.get("UNITPRICE", 0) for r in rows) - 145.42) < 1000  # sanity
-print("[poster] SL_CS: 7 lines posted, SQL auto-numbers, walk-in customer, "
-      "SV rates on revenue lines only  OK")
+assert beer["TAXAMT"] == 78.4, "SQL's computed SST must match the book"
+# THE 2026-07-28 KILLER: lines after BEER inherit 'SV 8%' via Append -
+# the poster must clear it, or every payment line carries phantom tax.
+for r in rows:
+    if (r.get("UNITPRICE") or 0) < 0:
+        assert not r.get("TAX"), f"payment line inherited tax: {r}"
+        assert not r.get("TAXAMT"), f"phantom tax computed: {r}"
+total_incl = sum((r.get("UNITPRICE") or 0) + (r.get("TAXAMT") or 0)
+                 for r in rows)
+assert abs(total_incl - 147.2) <= 0.02, \
+    f"document total must be the day's cash, got {total_incl}"
+print("[poster] SL_CS: 7 lines, phantom tax CLEARED on inherited lines, "
+      f"TAXDATE set, doc total {total_incl:.2f} = cash  OK")
+
+# --- 6. wrong tax code -> SQL computes a different SST than the book ->
+#        refuse BEFORE save (the ST-vs-SV class of failure) ---
+biz2 = _FakeBiz()
+biz2.detail.TAX_CODE_RATES = {"SV": None, "ST10": 10.0}
+bad_inv = {**day1_inv, "lines": [dict(l) for l in day1_inv["lines"]]}
+for l in bad_inv["lines"]:
+    if l["tax_code"]:
+        l["tax_code"] = "ST10"  # a 10% code against the book's 6%/8%
+try:
+    _post_one(_FakeApp(biz2), bad_inv)
+    raise AssertionError("wrong tax code must be refused before save")
+except ValueError as e:
+    assert "tax mismatch" in str(e), e
+assert not biz2.saved, "nothing may be saved on a tax mismatch"
+print("[poster] wrong tax code -> computed SST != book -> refused, "
+      "nothing saved  OK")
+
+# --- 7. description-keyed learning: the accountant's corrections stick ---
+from kira.batches import BatchStore
+from kira.review import approve_batch
+from kira.rules import RuleStore as RealRuleStore
+
+rules_dir = Path(tempfile.mkdtemp())
+real_rules = RealRuleStore(rules_dir)
+import kira.review as review_mod
+_orig_open = review_mod.open_client
+
+
+class _A:
+    def log_correction(self, *a, **k):
+        pass
+
+    def log_batch(self, *a, **k):
+        pass
+
+
+review_mod.open_client = lambda name, base="client_data": (ctx, real_rules, _A())
+try:
+    bstore = BatchStore(base=Path(tempfile.mkdtemp()))
+    b = bstore.create("TEST", ["sales.xlsx"], coded, validate_batch(coded, ctx, set()), [])
+    ok, info = approve_batch(bstore, b, coded)
+    assert ok, info
+finally:
+    review_mod.open_client = _orig_open
+
+fresh = classify(ensure_row_ids(df.copy()), ctx, real_rules)
+beer_fresh = fresh[fresh["description"] == "BEER"].iloc[0]
+assert beer_fresh["source"] == "rule", beer_fresh
+assert beer_fresh["account_code"] == "500-000"
+assert beer_fresh["supplier_code"] == "300-C0001"
+print("[learning] approved categories become description-keyed rules - "
+      "next month codes itself from her choices  OK")
 
 print("\nAll cash-sales checks passed.")

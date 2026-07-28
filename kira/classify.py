@@ -108,6 +108,11 @@ records into SQL Accounting. For each transaction line decide:
    "" for every non-journal line.
 
 5. tax_code — from the client's tax code list ("" if none applies).
+   For cash_sale revenue lines: a Malaysian F&B/entertainment/service
+   outlet charging SST on its takings uses the SERVICE tax code (usually
+   'SV'), NOT the sales-tax 'ST' codes — pick the service-tax code unless
+   this client's learned history says otherwise. Payment-method lines
+   (the negative ones) NEVER carry a tax code.
 
 6. confidence: high (certain) / medium (plausible) / low (needs human review).
 7. reason: one short sentence.
@@ -186,19 +191,27 @@ def harmonize_categories(out: pd.DataFrame) -> pd.DataFrame:
            + out.loc[mask, "description"].astype(str).str.strip().str.upper())
     for k in key.unique():
         idxs = key[key == k].index
-        codes = out.loc[idxs, "account_code"].astype(str)
-        if codes.nunique() <= 1:
-            continue
-        winner = codes.mode().iloc[0]
-        losers = [i for i in idxs if out.loc[i, "account_code"] != winner]
-        for i in losers:
-            was = out.loc[i, "account_code"]
-            out.loc[i, "account_code"] = winner
-            out.loc[i, "confidence"] = "medium"
-            out.loc[i, "reason"] = (
-                f"harmonized: AI chose {was} here but {winner} for the same "
-                f"category elsewhere in this batch — majority wins, please "
-                "confirm")
+        # account codes AND tax codes: one category = one treatment.
+        # (First live cash-sale batch: BEER got tax code ST on some days
+        # and ST5 on others, same chunk-independence effect as accounts.)
+        for col in ("account_code", "tax_code"):
+            if col not in out.columns:
+                continue
+            codes = out.loc[idxs, col].astype(str)
+            voters = codes[codes != ""] if col == "tax_code" else codes
+            if voters.nunique() <= 1:
+                continue
+            winner = voters.mode().iloc[0]
+            losers = [i for i in idxs
+                      if str(out.loc[i, col]) not in ("", winner)]
+            for i in losers:
+                was = out.loc[i, col]
+                out.loc[i, col] = winner
+                out.loc[i, "confidence"] = "medium"
+                out.loc[i, "reason"] = (
+                    f"harmonized: AI chose {was} here but {winner} for the "
+                    f"same category elsewhere in this batch — majority wins, "
+                    "please confirm")
     return out
 
 
@@ -218,7 +231,12 @@ def classify(df: pd.DataFrame, ctx: ClientContext, store: RuleStore,
     pending: list[int] = []
     for i, row in out.iterrows():
         hint = str(row.get("doc_type_hint", "") or "")
-        rule = store.lookup(row["supplier"], hint) if hint else None
+        # party-less category lines (daily takings) key by DESCRIPTION —
+        # mirror of the learn side in kira/review.py
+        rule_key = (str(row["supplier"]).strip()
+                    or (str(row["description"]).strip()
+                        if hint in ("journal", "cash_sale") else ""))
+        rule = store.lookup(rule_key, hint) if hint and rule_key else None
         if rule:
             out.loc[i, ["doc_type", "supplier_code", "account_code",
                         "tax_code"]] = [hint, rule["supplier_code"],

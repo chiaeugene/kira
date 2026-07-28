@@ -69,9 +69,17 @@ def approve_batch(store: BatchStore, batch: dict,
                     audit.log_correction(int(r["source_row"]), str(r["supplier"]),
                                          f, o.get(f, ""), r[f],
                                          str(r.get("source", "")))
-        if str(r["supplier"]).strip():  # partyless journals: nothing to key on
+        dtp = str(r.get("doc_type", "") or "purchase")
+        if str(r["supplier"]).strip():
             rules.learn(r["supplier"], r["supplier_code"], r["account_code"],
-                        r["tax_code"], str(r.get("doc_type", "") or "purchase"))
+                        r["tax_code"], dtp)
+        elif dtp in ("journal", "cash_sale") and str(r["description"]).strip():
+            # Party-less category lines (daily takings: 'BEER', 'CXM
+            # WALLET'...) learn by DESCRIPTION instead — so the accountant's
+            # account/tax choices for a category stick permanently, exactly
+            # like supplier rules do. classify() looks these up the same way.
+            rules.learn(r["description"], r["supplier_code"],
+                        r["account_code"], r["tax_code"], dtp)
     rules.save()
 
     store.update_rows(batch["id"], rows)
