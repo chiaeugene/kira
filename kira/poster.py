@@ -785,8 +785,15 @@ def probe_cash_sale_tax(cfg: SQLConfig, customer: str = "300-C0001",
 
     samples = [(63.0, 6.0, 3.78), (115.0, 8.0, 9.20)]  # book ground truths
     out: list[str] = []
+
+    def say(msg: str) -> None:
+        out.append(msg)
+        print(msg, flush=True)   # progressive: a hang shows its exact step
+
+    say("login OK, starting probe cases...")
     for case_name, steps in _probe_case_steps():
         for amount, rate, book_tax in samples:
+            say(f"... running {case_name} [{amount}@{rate:g}%]")
             biz, _ = _find_biz(app, "cash_sale", "SL_CS")
             if biz is None:
                 return ["SL_CS not available on this install"]
@@ -806,8 +813,8 @@ def probe_cash_sale_tax(cfg: SQLConfig, customer: str = "300-C0001",
                                    value_fn(amount, rate, tax_code, book_tax),
                                    kind=kind)
                     except RuntimeError as e:
-                        out.append(f"  {case_name} [{amount}@{rate:g}%]: "
-                                   f"step {fields} failed: {e}")
+                        say(f"  {case_name} [{amount}@{rate:g}%]: "
+                            f"step {fields} failed: {e}")
                 detail.Post()
                 reads = {}
                 for f in ("TAXAMT", "AMOUNT", "TAXABLEAMT", "TAXRATE",
@@ -818,10 +825,10 @@ def probe_cash_sale_tax(cfg: SQLConfig, customer: str = "300-C0001",
                         pass
                 verdict = "<-- MATCHES BOOK" if abs(
                     float(reads.get("TAXAMT") or 0) - book_tax) <= 0.02 else ""
-                out.append(f"{case_name} [{amount}@{rate:g}% book={book_tax}]"
-                           f": {reads} {verdict}")
+                say(f"{case_name} [{amount}@{rate:g}% book={book_tax}]"
+                    f": {reads} {verdict}")
             except Exception as e:
-                out.append(f"{case_name} [{amount}@{rate:g}%]: ERROR {e}")
+                say(f"{case_name} [{amount}@{rate:g}%]: ERROR {e}")
             finally:
                 try:
                     biz.Cancel()
