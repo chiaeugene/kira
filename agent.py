@@ -515,7 +515,11 @@ def verify_month(cfg: dict, month: str) -> int:
         try:
             r = httpx.get(f"{server}/api/agent/posted",
                           params={"client": name,
-                                  "month": f"{year:04d}-{mon:02d}"},
+                                  "month": f"{year:04d}-{mon:02d}",
+                                  # scope to the type we read from SQL below
+                                  # (SL_CS) - a client's history can hold the
+                                  # same days posted by an older method too
+                                  "doc_type": "cash_sale"},
                           headers={"Authorization": f"Bearer {token}"},
                           timeout=60)
             r.raise_for_status()

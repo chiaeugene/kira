@@ -387,17 +387,25 @@ def agent_report(body: dict):
 
 
 @app.get("/api/agent/posted", dependencies=[Depends(agent_auth)])
-def agent_posted(client: str, month: str = ""):
+def agent_posted(client: str, month: str = "", doc_type: str = ""):
     """What Kira believes it posted for ONE client — the Agent's half of
     the --verify reconciliation (the other half is read straight from SQL).
     Agent-scoped on purpose: /api/batches is firm-only and returns every
-    client, which an Agent has no business reading."""
+    client, which an Agent has no business reading.
+
+    doc_type MATTERS: a client's history can contain the same days posted
+    under different methods (this client's July exists as old journal
+    batches AND as the current cash-sale batches). Mixing them makes the
+    reconciliation meaningless, so callers scope to the type they are
+    verifying."""
     _require_client(client)
     days: dict[str, dict] = {}
     for b in store.list(client, "posted"):
         for row in b["rows"]:
             date = str(row.get("date", ""))
             if month and not date.startswith(month):
+                continue
+            if doc_type and str(row.get("doc_type", "")) != doc_type:
                 continue
             key = str(row.get("doc_no") or date)
             d = days.setdefault(key, {"date": date, "cash": 0.0, "lines": 0})
