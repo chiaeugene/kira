@@ -41,6 +41,7 @@ import agent as agent_mod  # noqa: E402
 
 api = TestClient(server.app)
 FIRM = {"Authorization": "Bearer dev-firm-token-change-me"}
+AGENT = {"Authorization": "Bearer dev-agent-token-change-me"}
 
 
 def variant(tag: str) -> Path:
@@ -121,7 +122,25 @@ assert agent_mod.poll_once(agent_cfg, client=TestClientAdapter()) == "posted"
 assert api.get(f"/api/batches/{bid}", headers=FIRM).json()["state"] == "posted"
 print("[agent] polled, posted (dry run), reported")
 
-# 4b. heartbeat visible on the Connections surface
+# 4b. agent-scoped posted-work readback (the --verify reconciliation half).
+# Must reflect what actually reached SQL - driven by the duplicate-guard
+# registry, NOT batch state, so a partially-posted batch still reports the
+# documents that really landed.
+r = api.get("/api/agent/posted", headers=AGENT,
+            params={"client": "DEMO_CLIENT"})
+assert r.status_code == 200, r.text
+seen = r.json()
+assert seen, "a posted batch must appear in the agent's posted readback"
+assert all({"key", "date", "cash", "lines"} <= set(d) for d in seen), seen
+assert sum(d["lines"] for d in seen) == 11, seen
+r = api.get("/api/agent/posted", headers=FIRM, params={"client": "DEMO_CLIENT"})
+assert r.status_code == 401, "posted-readback is agent-only"
+r = api.get("/api/batches", headers=AGENT)
+assert r.status_code == 401, "/api/batches must stay firm-only"
+print(f"[agent-posted] {len(seen)} day(s), 11 line(s) readback; "
+      "firm token and cross-route access rejected  OK")
+
+# 4c. heartbeat visible on the Connections surface
 agents = api.get("/api/agents", headers=FIRM).json()
 assert "office-pc-1" in agents
 assert agents["office-pc-1"]["modes"]["DEMO_CLIENT"] == "dry_run"
@@ -248,7 +267,6 @@ print("[add-client] invalid characters rejected  OK")
 # 8c. Agent-driven discovery: register (agent token, not firm token) creates
 #     a brand-new client, then a second register with the SAME name links
 #     without touching whatever masters got added in between.
-AGENT = {"Authorization": "Bearer dev-agent-token-change-me"}
 r = api.post("/api/clients/register", headers=AGENT,
              json={"name": "DISCOVERED_CO", "label": "Discovered Sdn Bhd",
                   "fdb_name": "ACC-7777.FDB", "agent_name": "test-office-pc"})
@@ -319,24 +337,6 @@ assert r.status_code == 200 and r.json()["cleared"] > 0, r.text
 r = api.post("/api/clients/DEMO_CLIENT/registry/clear", headers=AGENT)
 assert r.status_code == 401, "registry clear is firm-only"
 print(f"[registry-clear] duplicate guard reset; agent token rejected  OK")
-
-# 8f. agent-scoped posted-work readback (the --verify reconciliation half).
-# Agent token allowed (it needs its own work back); firm token rejected on
-# this agent-only route, and /api/batches stays firm-only so an Agent can
-# never enumerate every client's batches.
-r = api.get("/api/agent/posted", headers=AGENT,
-            params={"client": "DEMO_CLIENT", "month": "2026-06"})
-assert r.status_code == 200, r.text
-posted_days = r.json()
-assert isinstance(posted_days, list)
-assert all({"key", "date", "cash", "lines"} <= set(d) for d in posted_days)
-r = api.get("/api/agent/posted", headers=FIRM, params={"client": "DEMO_CLIENT"})
-assert r.status_code == 401, "posted-readback is agent-only"
-r = api.get("/api/batches", headers=AGENT)
-assert r.status_code == 401, "/api/batches must stay firm-only"
-print(f"[agent-posted] agent reads its own posted work "
-      f"({len(posted_days)} day(s)); firm token and cross-route access "
-      "rejected  OK")
 
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()

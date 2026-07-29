@@ -399,14 +399,38 @@ def agent_posted(client: str, month: str = "", doc_type: str = ""):
     reconciliation meaningless, so callers scope to the type they are
     verifying."""
     _require_client(client)
+    # Source of truth is the DUPLICATE-GUARD REGISTRY, not batch state: a
+    # batch where 18 of 19 documents posted is marked 'failed' as a whole,
+    # yet those 18 really are in SQL (partial-post protection records them).
+    # Reconciling off batch state alone would have reported 18 real
+    # documents as EXTRA. Registry keys are doc_type|party|doc_no|amount|...
+    reg = PostedRegistry(client_dir(client))
+    posted_docs = set()
+    for k in reg.keys:
+        parts = k.split("|")
+        if len(parts) >= 3:
+            posted_docs.add((parts[0], parts[2].upper()))
+
     days: dict[str, dict] = {}
-    for b in store.list(client, "posted"):
+    seen_rows: set[tuple] = set()
+    for b in store.list(client):
         for row in b["rows"]:
             date = str(row.get("date", ""))
             if month and not date.startswith(month):
                 continue
-            if doc_type and str(row.get("doc_type", "")) != doc_type:
+            dtp = str(row.get("doc_type", ""))
+            if doc_type and dtp != doc_type:
                 continue
+            doc_no = str(row.get("doc_no", "") or "")
+            if (dtp, doc_no.upper()) not in posted_docs:
+                continue    # never actually reached SQL
+            # the same day can appear in several batches (re-uploads after
+            # failures) - count each line once
+            sig = (dtp, doc_no, str(row.get("description", "")),
+                   round(float(row.get("amount", 0) or 0), 2))
+            if sig in seen_rows:
+                continue
+            seen_rows.add(sig)
             key = str(row.get("doc_no") or date)
             d = days.setdefault(key, {"date": date, "cash": 0.0, "lines": 0})
             d["cash"] += (float(row.get("amount", 0) or 0)
