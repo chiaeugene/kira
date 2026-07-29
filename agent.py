@@ -489,6 +489,106 @@ def dump_fields_cli(cfg: dict) -> int:
     return 0
 
 
+def verify_month(cfg: dict, month: str) -> int:
+    """Reconcile one month: what the cloud says Kira posted vs what is
+    ACTUALLY in SQL right now. Read-only - the answer to 'is my month
+    really complete and correct?' without anyone eyeballing a document
+    list (which cost two correct documents on 2026-07-29)."""
+    import calendar
+
+    from kira.poster import SQLConfig, list_documents
+
+    try:
+        year, mon = (int(x) for x in month.split("-"))
+        d_from = f"{year:04d}-{mon:02d}-01"
+        d_to = f"{year:04d}-{mon:02d}-{calendar.monthrange(year, mon)[1]:02d}"
+    except Exception:
+        print(f"Bad month '{month}' - use YYYY-MM, e.g. 2026-07")
+        return 2
+
+    server, token = cfg["server_url"], cfg["agent_token"]
+    rc = 0
+    for name, ccfg in cfg["clients"].items():
+        print(f"\n{'=' * 64}\nVERIFY {name}  {month}\n{'=' * 64}")
+        # 1. what Kira believes it posted (from the cloud's batch records)
+        expected: dict[str, dict] = {}
+        try:
+            r = httpx.get(f"{server}/api/batches",
+                          params={"client": name, "state": "posted"},
+                          headers={"Authorization": f"Bearer {token}"},
+                          timeout=60)
+            r.raise_for_status()
+            for summary in r.json():
+                d = httpx.get(f"{server}/api/batches/{summary['batch_id']}",
+                              headers={"Authorization": f"Bearer {token}"},
+                              timeout=60).json()
+                for row in d.get("rows", []):
+                    if not str(row.get("date", "")).startswith(f"{year:04d}-{mon:02d}"):
+                        continue
+                    key = str(row.get("doc_no") or row.get("date"))
+                    e = expected.setdefault(key, {"date": str(row["date"]),
+                                                  "cash": 0.0})
+                    e["cash"] += float(row.get("amount", 0) or 0) + \
+                        float(row.get("tax", 0) or 0)
+        except Exception as e:
+            print(f"  Could not read Kira's records from the cloud: {e}")
+            return 1
+
+        # 2. what SQL actually holds right now
+        sql_cfg = SQLConfig(**{k: ccfg.get(k, "") for k in
+                               ("user", "password", "dcf_path", "fdb_name")})
+        try:
+            actual = list_documents(sql_cfg, "SL_CS", d_from, d_to)
+        except Exception as e:
+            print(f"  Could not read SQL: {e}")
+            return 1
+
+        kira_docs = [a for a in actual
+                     if "DAILY TAKINGS" in str(a.get("description", "")).upper()]
+        by_date: dict[str, list] = {}
+        for a in kira_docs:
+            by_date.setdefault(str(a.get("docdate", ""))[:10], []).append(a)
+
+        print(f"Kira's records: {len(expected)} day(s) posted")
+        print(f"In SQL now:     {len(kira_docs)} 'DAILY TAKINGS' document(s)")
+        print()
+        problems = 0
+        for key in sorted(expected, key=lambda k: expected[k]["date"]):
+            exp = expected[key]
+            day = exp["date"][:10]
+            found = by_date.get(day, [])
+            if not found:
+                print(f"  MISSING  {day}  expected cash {exp['cash']:>10.2f} "
+                      "- not in SQL (deleted?)")
+                problems += 1
+            elif len(found) > 1:
+                nos = ", ".join(str(f.get("docno", "")) for f in found)
+                print(f"  DUPLICATE {day}  {len(found)} documents: {nos}")
+                problems += 1
+            else:
+                got = float(found[0].get("docamt", 0) or 0)
+                if abs(got - exp["cash"]) > 0.02:
+                    print(f"  AMOUNT   {day}  {found[0].get('docno','')}: SQL "
+                          f"{got:.2f} vs book {exp['cash']:.2f}")
+                    problems += 1
+        extra_days = set(by_date) - {v["date"][:10] for v in expected.values()}
+        for day in sorted(extra_days):
+            nos = ", ".join(str(f.get("docno", "")) for f in by_date[day])
+            print(f"  EXTRA    {day}  in SQL but not in Kira's records: {nos}")
+            problems += 1
+
+        total_sql = sum(float(a.get("docamt", 0) or 0) for a in kira_docs)
+        total_exp = sum(v["cash"] for v in expected.values())
+        print(f"\n  Total in SQL:   {total_sql:>12,.2f}")
+        print(f"  Total expected: {total_exp:>12,.2f}")
+        if problems == 0 and abs(total_sql - total_exp) <= 0.02:
+            print("\n  CLEAN - every day present exactly once, totals agree.")
+        else:
+            print(f"\n  {problems} problem(s) above need attention.")
+            rc = 1
+    return rc
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--once", action="store_true")
@@ -502,6 +602,10 @@ def main() -> int:
                     help="read-only: try every candidate tax write-sequence "
                          "on an in-memory Cash Sales line and print what SQL "
                          "computes for each (never saves anything)")
+    ap.add_argument("--verify", metavar="YYYY-MM",
+                    help="read-only: compare what Kira posted for a month "
+                         "against what is ACTUALLY in SQL right now - lists "
+                         "missing, extra and mismatched documents")
     ap.add_argument("--config", default=str(BASE_DIR / "agent_config.yaml"))
     args = ap.parse_args()
 
@@ -535,6 +639,9 @@ def main() -> int:
 
     if args.dump_fields:
         return dump_fields_cli(cfg)
+
+    if args.verify:
+        return verify_month(cfg, args.verify)
 
     if args.probe_cs:
         from kira.poster import probe_cash_sale_tax

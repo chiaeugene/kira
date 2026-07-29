@@ -231,7 +231,14 @@ class _FakeDataSets:
         return self.main if name == "MainDataSet" else self.detail
 
 
+_JV_SEQ = [0]
+
+
 class _FakeBiz:
+    """Save() assigns a document number like the real SDK - Kira reads it
+    back as proof the document persisted (a blank number means a silent
+    rollback and must be reported as failure, not success)."""
+
     def __init__(self):
         self.main = _FakeDataSet()
         self.detail = _FakeDataSet()
@@ -241,7 +248,8 @@ class _FakeBiz:
         pass
 
     def Save(self):
-        pass
+        _JV_SEQ[0] += 1
+        self.main.fields["DOCNO"].stored = f"JV 2607-{_JV_SEQ[0]:04d}"
 
 
 class _FakeBizObjects:
@@ -310,8 +318,11 @@ try:
 except ValueError as e:
     assert "did not stick" in str(e), e
 print("[poster] silently-zeroed amount -> post refused, no zero voucher  OK")
-assert "DOCNO" not in biz.main.queried, \
-    f"journal must NOT write its internal grouping key to SQL's DocNo, queried={biz.main.queried}"
+assert not str(biz.main.fields["DOCNO"].stored or "").startswith("TAKINGS"), \
+    ("journal must NOT write its internal grouping key to SQL's DocNo, got "
+     f"{biz.main.fields['DOCNO'].stored}")
+assert str(biz.main.fields["DOCNO"].stored or "").startswith("JV "), \
+    "SQL's assigned document number must be readable after Save (identity)"
 assert "CODE" in biz.detail.queried, "journal detail account must use CODE (confirmed field name)"
 assert "DR" in biz.detail.queried or "CR" in biz.detail.queried
 print("[poster] journal never writes its internal doc_no to SQL - "

@@ -308,18 +308,29 @@ class _FakeDataSets:
         return self.main if name == "MainDataSet" else self.det
 
 
+_DOC_SEQ = [0]
+
+
 class _FakeBiz:
-    def __init__(self):
+    """Save() assigns a document number, like the real SDK - Kira must read
+    it back (document identity) and must REFUSE to claim success when it
+    comes back blank (the silent-rollback case, live-observed 2026-07-25)."""
+
+    def __init__(self, assigns_docno: bool = True):
         self.main = _FakeDataSet(MAIN)
         self.detail = _FakeDataSet(DETAIL)
         self.DataSets = _FakeDataSets(self.main, self.detail)
         self.saved = False
+        self.assigns_docno = assigns_docno
 
     def New(self):
         pass
 
     def Save(self):
         self.saved = True
+        if self.assigns_docno:
+            _DOC_SEQ[0] += 1
+            self.main.fields["DOCNO"].stored = f"CS 2607-{_DOC_SEQ[0]:04d}"
 
 
 class _FakeBizObjects:
@@ -338,8 +349,12 @@ class _FakeApp:
 biz = _FakeBiz()
 _post_one(_FakeApp(biz), day1_inv)
 assert biz.saved
-assert "DOCNO" not in biz.main.queried, \
-    "cash sale must let SQL auto-number (CS 2607-xxxx), never TAKINGS- tags"
+# SQL auto-numbers: our internal TAKINGS- tag must never be written into
+# DOCNO. (Reading DOCNO back AFTER Save is required - document identity.)
+assert not str(biz.main.fields["DOCNO"].stored or "").startswith("TAKINGS"), \
+    f"internal tag leaked into DOCNO: {biz.main.fields['DOCNO'].stored}"
+assert str(biz.main.fields["DOCNO"].stored or "").startswith("CS "), \
+    "SQL's assigned document number must be readable after Save"
 assert biz.main.fields["CODE"].stored == "300-C0001"
 assert isinstance(biz.main.fields["DOCDATE"].stored, dt.datetime)
 rows = biz.detail.posted_rows
@@ -442,6 +457,8 @@ class _BoundaryBiz(_FakeBiz):
                             "already processed, insert is not allowed', "
                             "None, 0, -2147418113), None)")
         self.saved = True
+        _DOC_SEQ[0] += 1
+        self.main.fields["DOCNO"].stored = f"CS 2607-{_DOC_SEQ[0]:04d}"
 
     def New(self):
         # fresh document per attempt, like the real SDK
@@ -469,5 +486,23 @@ assert [d.day for d in bbiz.attempts] == [1, 2], \
 assert bbiz.saved
 print("[poster] SST boundary refusal -> one retry with tax date +1 day -> "
       "posted with a warning, not a failure  OK")
+
+# --- 9. DOCUMENT IDENTITY: the number SQL assigns must be captured, and a
+#     save that persists NOTHING (blank number = the silent rollback seen
+#     live on 2026-07-25) must be reported as a FAILURE, never as posted.
+ident_biz = _FakeBiz()
+
+doc_no = _post_one(_FakeApp(ident_biz), day1_inv)
+assert doc_no and doc_no.startswith("CS "), doc_no
+print(f"[identity] posting returns SQL's own document number ({doc_no})  OK")
+
+rollback_biz = _FakeBiz(assigns_docno=False)   # Save succeeds, nothing persists
+try:
+    _post_one(_FakeApp(rollback_biz), day1_inv)
+    raise AssertionError("a silent rollback must NOT be reported as posted")
+except ValueError as e:
+    assert "did not persist" in str(e), e
+print("[identity] silent rollback (no doc number) -> hard failure, not a "
+      "false 'posted'  OK")
 
 print("\nAll cash-sales checks passed.")

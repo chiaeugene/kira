@@ -215,8 +215,8 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
 
         for inv in invoices:
             try:
-                _post_one(app, inv)
-                posted.append(inv)
+                sql_doc_no = _post_one(app, inv)
+                posted.append({**inv, "sql_doc_no": sql_doc_no})
             except Exception as e:  # keep going; report per-invoice failures
                 msg = str(e)
                 # SST period-boundary quirk (live-observed 2026-07-29): a
@@ -232,8 +232,8 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
                         nudged = (_dt.datetime.strptime(
                             str(inv["doc_date"])[:10], "%Y-%m-%d")
                             + _dt.timedelta(days=1)).strftime("%Y-%m-%d")
-                        _post_one(app, inv, tax_date=nudged)
-                        posted.append(inv)
+                        sql_doc_no = _post_one(app, inv, tax_date=nudged)
+                        posted.append({**inv, "sql_doc_no": sql_doc_no})
                         warnings.append(
                             f"{inv['doc_no']}: posted OK on retry - SQL "
                             f"refused tax date {inv['doc_date']} as inside "
@@ -540,6 +540,73 @@ def _post_one(app, inv: dict, tax_date: str | None = None) -> None:
                         f"{expected:.2f} - wrong tax code? refusing to save")
 
     biz.Save()
+
+    # DOCUMENT IDENTITY - read back the number SQL assigned. Without this
+    # Kira posts into a ledger and forgets what it wrote: it cannot verify
+    # its own work, cannot tell its documents apart from leftovers, and
+    # cannot clean up after itself. That gap is what forced a by-eye
+    # cleanup of a scrambled document list and cost two correct documents
+    # (2026-07-29). A blank number here also means the save did NOT
+    # persist (silently rolled back, live-observed 2026-07-25) - so an
+    # empty read is a hard failure, never a success.
+    doc_no = ""
+    for cand in ("DocNo", "DOCNO"):
+        try:
+            doc_no = str(main.FindField(cand).Value or "").strip()
+            if doc_no:
+                break
+        except Exception:
+            continue
+    if not doc_no:
+        raise ValueError(
+            "document saved but SQL returned no document number - it did "
+            "not persist (silent rollback). Refusing to report this as "
+            "posted; nothing was recorded in the duplicate guard.")
+    return doc_no
+
+
+def list_documents(cfg: SQLConfig, sql_doc: str = "SL_CS",
+                   date_from: str = "", date_to: str = "") -> list[dict]:
+    """Read documents straight out of SQL for reconciliation (read-only).
+
+    Kira's own record of what it posted is only half the truth; this is the
+    other half - what the ledger ACTUALLY contains right now. Comparing the
+    two is what makes 'posted' a verifiable fact instead of a claim."""
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    app = win32com.client.Dispatch("SQLAcc.BizApp")
+    if not app.IsLogin:
+        app.Login(cfg.user, cfg.password, cfg.dcf_path, cfg.fdb_name)
+
+    table = {"SL_CS": "SL_CS", "SL_IV": "SL_IV", "GL_JE": "GL_JE",
+             "PH_PI": "PH_PI"}.get(sql_doc, sql_doc)
+    where = []
+    if date_from:
+        where.append(f"DOCDATE >= '{date_from}'")
+    if date_to:
+        where.append(f"DOCDATE <= '{date_to}'")
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    out: list[dict] = []
+    for query in (f"SELECT DOCNO, DOCDATE, DESCRIPTION, DOCAMT FROM {table}{clause}",
+                  f"SELECT DOCNO, DOCDATE, DOCAMT FROM {table}{clause}"):
+        try:
+            ds = app.DBManager.NewDataSet(query)
+            ds.First()
+            while not ds.Eof:
+                rec = {}
+                for f in ("DOCNO", "DOCDATE", "DESCRIPTION", "DOCAMT"):
+                    try:
+                        v = ds.FindField(f).Value
+                        rec[f.lower()] = "" if v is None else v
+                    except Exception:
+                        rec[f.lower()] = ""
+                out.append(rec)
+                ds.Next()
+            return out
+        except Exception:
+            continue
+    return out
 
 
 def dump_fields(cfg: SQLConfig,
