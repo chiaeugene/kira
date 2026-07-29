@@ -48,7 +48,7 @@ BASE_DIR = (Path(sys.executable).parent if getattr(sys, "frozen", False)
 # Stamped into every build. Several sessions were lost to "which exe am I
 # actually running?" after successive versions were extracted over each
 # other in the same folder - the answer must be visible, not inferred.
-VERSION = "v24"
+VERSION = "v25"
 
 load_env(BASE_DIR / ".env")  # can carry KIRA_SERVER_URL / KIRA_AGENT_TOKEN
 

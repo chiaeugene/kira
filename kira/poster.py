@@ -579,20 +579,22 @@ def list_documents(cfg: SQLConfig, sql_doc: str = "SL_CS",
     if not app.IsLogin:
         app.Login(cfg.user, cfg.password, cfg.dcf_path, cfg.fdb_name)
 
-    table = {"SL_CS": "SL_CS", "SL_IV": "SL_IV", "GL_JE": "GL_JE",
-             "PH_PI": "PH_PI"}.get(sql_doc, sql_doc)
-    where = []
-    if date_from:
-        where.append(f"DOCDATE >= '{date_from}'")
-    if date_to:
-        where.append(f"DOCDATE <= '{date_to}'")
-    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    # No WHERE clause and a hard row cap, deliberately: the date-filtered
+    # variant hung for 10+ minutes on the live install (2026-07-29) while
+    # read_masters' plain unfiltered SELECTs have always worked. An
+    # unbounded `while not ds.Eof` also spins forever if the cursor never
+    # reaches Eof, which is indistinguishable from a hang. Filter in
+    # Python instead - these tables are thousands of rows, not millions.
+    table = str(sql_doc)
+    max_rows = 20000
     out: list[dict] = []
-    for query in (f"SELECT DOCNO, DOCDATE, DESCRIPTION, DOCAMT FROM {table}{clause}",
-                  f"SELECT DOCNO, DOCDATE, DOCAMT FROM {table}{clause}"):
+    last_err = ""
+    for query in (f"SELECT DOCNO, DOCDATE, DESCRIPTION, DOCAMT FROM {table}",
+                  f"SELECT DOCNO, DOCDATE, DOCAMT FROM {table}"):
         try:
             ds = app.DBManager.NewDataSet(query)
             ds.First()
+            rows = 0
             while not ds.Eof:
                 rec = {}
                 for f in ("DOCNO", "DOCDATE", "DESCRIPTION", "DOCAMT"):
@@ -602,11 +604,30 @@ def list_documents(cfg: SQLConfig, sql_doc: str = "SL_CS",
                     except Exception:
                         rec[f.lower()] = ""
                 out.append(rec)
+                rows += 1
+                if rows % 500 == 0:
+                    print(f"      ... {rows} rows read", flush=True)
+                if rows >= max_rows:
+                    print(f"      (stopped at {max_rows} rows - safety cap)",
+                          flush=True)
+                    break
                 ds.Next()
-            return out
-        except Exception:
+            break
+        except Exception as e:
+            last_err = str(e)
+            out = []
             continue
-    return out
+    if not out and last_err:
+        raise RuntimeError(f"could not read {table}: {last_err}")
+
+    def _in_range(rec) -> bool:
+        d = str(rec.get("docdate", ""))[:10]
+        if not d:
+            return False
+        return ((not date_from or d >= date_from)
+                and (not date_to or d <= date_to))
+
+    return [r for r in out if _in_range(r)]
 
 
 def dump_fields(cfg: SQLConfig,
