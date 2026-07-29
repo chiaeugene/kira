@@ -183,10 +183,18 @@ class _FakeFields:
         return _FakeFieldMeta(self._names[i])
 
 
+def _rate_of(v) -> float:
+    try:
+        return float(str(v).rstrip("%") or 0)
+    except ValueError:
+        return 0.0
+
+
 class _RateQuirkField(_FakeField):
-    """The REAL SL_CS quirk found on the third live run (2026-07-29):
-    writing a numeric TAXRATE makes SQL drop the RATE VALUE into TAXAMT
-    ('SQL computed 6.00 ... but the book says 3.78')."""
+    """Measured by --probe-cs on the live install (2026-07-29): writing
+    TAXRATE when the price is ALREADY set drops the rate value into TAXAMT
+    (probe cases B/C failed this way); written BEFORE the price it just
+    stores, and the later price write recomputes correctly (case A)."""
 
     def __init__(self, ds):
         super().__init__()
@@ -199,8 +207,34 @@ class _RateQuirkField(_FakeField):
     @Value.setter
     def Value(self, v):
         self.stored = v
-        if "TAXAMT" in self._ds.fields:
-            self._ds.fields["TAXAMT"].stored = float(str(v).rstrip("%") or 0)
+        price = (self._ds.fields.get("UNITPRICE").stored
+                 if "UNITPRICE" in self._ds.fields else None)
+        if price and "TAXAMT" in self._ds.fields:
+            self._ds.fields["TAXAMT"].stored = _rate_of(v)  # the quirk
+
+
+class _PriceField(_FakeField):
+    """Price write triggers SQL's CORRECT recompute when tax is already on
+    the line (probe case A): TAXAMT = price * rate / 100."""
+
+    def __init__(self, ds):
+        super().__init__()
+        self._ds = ds
+
+    @property
+    def Value(self):
+        return self.stored
+
+    @Value.setter
+    def Value(self, v):
+        self.stored = v
+        f = self._ds.fields
+        code = f.get("TAX").stored if "TAX" in f else None
+        if code and "TAXAMT" in f:
+            rate = _rate_of(f.get("TAXRATE").stored if "TAXRATE" in f else 0)
+            if not rate:
+                rate = 8.0  # SV's default rate, per probe case D
+            f["TAXAMT"].stored = round(float(v) * rate / 100, 2)
 
 
 class _FakeDataSet:
@@ -223,6 +257,8 @@ class _FakeDataSet:
         f = {n: _FakeField() for n in self.names}
         if "TAXRATE" in f:
             f["TAXRATE"] = _RateQuirkField(self)
+        if "UNITPRICE" in f:
+            f["UNITPRICE"] = _PriceField(self)
         return f
 
     def FindField(self, name):

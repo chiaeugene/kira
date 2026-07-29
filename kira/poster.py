@@ -426,30 +426,18 @@ def _post_one(app, inv: dict) -> None:
         for line in inv["lines"]:
             detail.Append()
             # invoice-style documents (PH_PI, PH_CN, SL_IV, SL_CN, SL_CS)
+            #
+            # WRITE ORDER IS LOAD-BEARING, measured by --probe-cs on the
+            # live install (2026-07-29): tax code + rate go on the line
+            # BEFORE the amount — exactly like the UI, where the tax sits
+            # on the row before the price is keyed. Every other order
+            # miscomputes: price-then-tax recalculates on the tax-inclusive
+            # base (4.01 instead of 3.78), a float rate lands the rate
+            # value in the tax amount (6.00), and the code's default rate
+            # (SV = 8%) is wrong for 6% lines. Probe case A: rate written
+            # as the UI's own string ('6%'), then price -> 3.78/9.20 exact.
             _set_first(detail, ("Account", "ItemCode"), line["account_code"])
             _set_first(detail, ("Description",), line["description"])
-            actual = _set_first(detail, ("UnitPrice", "Amount"),
-                                line["amount"], kind="float")
-            got = detail.FindField(actual).Value
-            if abs(float(got or 0) - line["amount"]) > 0.01:
-                raise ValueError(
-                    f"amount did not stick: wrote {line['amount']} to "
-                    f"{actual}, read back {got!r} - refusing to save a "
-                    "zero/garbled document (same guard that caught the "
-                    "zero-voucher bug on journals)")
-            try:
-                _set_first(detail, ("Qty",), 1, kind="float")
-            except RuntimeError:
-                pass
-            # Tax is ALWAYS set explicitly - code+rate on taxed lines, and
-            # EXPLICITLY CLEARED on untaxed ones. SQL Accounting carries the
-            # previous line's tax onto each new line (visible in the
-            # accountant's own video: a fresh row appears pre-filled
-            # 'SV 8%'); leaving untaxed lines untouched let the negative
-            # payment lines inherit tax, which drove document totals
-            # negative and failed the C.O.D. payment check - and silently
-            # CORRUPTED the documents that happened to stay positive
-            # (2026-07-28 field bug, 6 wrong documents saved).
             expected_tax = float(line.get("tax_amount", 0.0) or 0.0)
             # A tax code with neither a rate nor an amount is decoration
             # (e.g. the AI once tagged a service-charge line 'SV' at 0%);
@@ -461,11 +449,6 @@ def _post_one(app, inv: dict) -> None:
                 _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
                 rate = float(line.get("tax_rate", 0.0) or 0.0)
                 if rate:
-                    # The UI shows the rate as '6%'; writing it as a bare
-                    # float made SQL drop the RATE into the tax-AMOUNT
-                    # ('computed 6.00 ... book says 3.78', 2026-07-29 field
-                    # bug - every taxed line, whole batch refused). Try the
-                    # UI's own string form first, float as fallback.
                     for attempt, kind in ((f"{rate:g}%", "str"),
                                           (rate, "float")):
                         try:
@@ -474,22 +457,9 @@ def _post_one(app, inv: dict) -> None:
                             break
                         except RuntimeError:
                             continue
-                # If SQL's computed figure doesn't match the book, write the
-                # book's figure explicitly (it IS the ground truth - the
-                # same numbers the accountant's own document showed) and let
-                # the post-Post verification confirm it survived.
-                try:
-                    got_pre = float(detail.FindField("TAXAMT").Value or 0)
-                except Exception:
-                    got_pre = None
-                if got_pre is not None and abs(got_pre - expected_tax) > 0.02:
-                    for f_name in ("TaxAmt", "LocalTaxAmt"):
-                        try:
-                            _set_first(detail, (f_name,), expected_tax,
-                                       kind="float")
-                        except RuntimeError:
-                            pass
             else:
+                # explicitly CLEAR inherited tax (Append copies the previous
+                # line's TAX/TAXRATE - 2026-07-28 phantom-tax corruption)
                 try:
                     _set_first(detail, ("Tax", "TaxType"), "")
                 except RuntimeError:
@@ -500,6 +470,20 @@ def _post_one(app, inv: dict) -> None:
                     pass
             try:
                 _set_first(detail, ("TaxInclusive",), 0, kind="float")
+            except RuntimeError:
+                pass
+            # price LAST - this is what triggers SQL's correct recompute
+            actual = _set_first(detail, ("UnitPrice", "Amount"),
+                                line["amount"], kind="float")
+            got = detail.FindField(actual).Value
+            if abs(float(got or 0) - line["amount"]) > 0.01:
+                raise ValueError(
+                    f"amount did not stick: wrote {line['amount']} to "
+                    f"{actual}, read back {got!r} - refusing to save a "
+                    "zero/garbled document (same guard that caught the "
+                    "zero-voucher bug on journals)")
+            try:
+                _set_first(detail, ("Qty",), 1, kind="float")
             except RuntimeError:
                 pass
             detail.Post()
