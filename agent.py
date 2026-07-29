@@ -495,6 +495,10 @@ def main() -> int:
                     help="read-only: print SQL Accounting's real field names "
                          "for every posting module (go-live prerequisite, "
                          "never writes anything)")
+    ap.add_argument("--probe-cs", action="store_true",
+                    help="read-only: try every candidate tax write-sequence "
+                         "on an in-memory Cash Sales line and print what SQL "
+                         "computes for each (never saves anything)")
     ap.add_argument("--config", default=str(BASE_DIR / "agent_config.yaml"))
     args = ap.parse_args()
 
@@ -528,6 +532,23 @@ def main() -> int:
 
     if args.dump_fields:
         return dump_fields_cli(cfg)
+
+    if args.probe_cs:
+        from kira.poster import probe_cash_sale_tax
+        for name, ccfg in cfg["clients"].items():
+            print(f"\n{'=' * 60}\nPROBE {name} -> {ccfg.get('fdb_name', '?')}"
+                  f"\n{'=' * 60}")
+            sql_cfg = SQLConfig(**{k: ccfg.get(k, "") for k in
+                                   ("user", "password", "dcf_path",
+                                    "fdb_name")})
+            try:
+                for line in probe_cash_sale_tax(sql_cfg):
+                    print(line)
+            except Exception as e:
+                print(f"  Probe failed: {e}")
+        print("\nNOTHING was saved - this probe never calls Save. Send the "
+              "output above back for analysis.")
+        return 0
 
     banner(cfg)
 

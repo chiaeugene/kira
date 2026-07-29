@@ -717,3 +717,114 @@ def read_masters(cfg: SQLConfig) -> tuple[dict[str, list[dict]], str]:
         return {}, "; ".join(problems)
     parts = (["partial - " + "; ".join(problems)] if problems else []) + notes
     return masters, "; ".join(parts)
+
+
+# ---------------- go-live probe: how does SL_CS compute tax? ----------------
+# Two live batches were refused by our own safety gate because SQL's
+# recalculation engine reacted differently to every write sequence we tried
+# (rate-as-float -> rate landed in TAXAMT; explicit TAXAMT -> recomputed on
+# the tax-inclusive base). Guessing one live batch at a time wastes real
+# runs. This probe tries every candidate sequence on ONE in-memory line,
+# reads back what SQL computes, and prints a table - NOTHING IS SAVED
+# (biz.Save is never called, same guarantee as dump_fields).
+
+def _probe_case_steps():
+    """Each case: (name, ordered list of (field-candidates, value-fn, kind)).
+    value-fn gets (amount, rate, tax_code, book_tax)."""
+    return [
+        ("A: tax+rate(str) FIRST, then price", [
+            (("Tax", "TaxType"), lambda a, r, t, b: t, "str"),
+            (("TaxRate",), lambda a, r, t, b: f"{r:g}%", "str"),
+            (("TaxInclusive",), lambda a, r, t, b: 0, "float"),
+            (("UnitPrice", "Amount"), lambda a, r, t, b: a, "float"),
+            (("Qty",), lambda a, r, t, b: 1, "float"),
+        ]),
+        ("B: tax+rate(float) FIRST, then price", [
+            (("Tax", "TaxType"), lambda a, r, t, b: t, "str"),
+            (("TaxRate",), lambda a, r, t, b: r, "float"),
+            (("TaxInclusive",), lambda a, r, t, b: 0, "float"),
+            (("UnitPrice", "Amount"), lambda a, r, t, b: a, "float"),
+            (("Qty",), lambda a, r, t, b: 1, "float"),
+        ]),
+        ("C: price first, tax+rate(str) after", [
+            (("UnitPrice", "Amount"), lambda a, r, t, b: a, "float"),
+            (("Qty",), lambda a, r, t, b: 1, "float"),
+            (("Tax", "TaxType"), lambda a, r, t, b: t, "str"),
+            (("TaxRate",), lambda a, r, t, b: f"{r:g}%", "str"),
+            (("TaxInclusive",), lambda a, r, t, b: 0, "float"),
+        ]),
+        ("D: tax code only (its default rate), then price", [
+            (("Tax", "TaxType"), lambda a, r, t, b: t, "str"),
+            (("TaxInclusive",), lambda a, r, t, b: 0, "float"),
+            (("UnitPrice", "Amount"), lambda a, r, t, b: a, "float"),
+            (("Qty",), lambda a, r, t, b: 1, "float"),
+        ]),
+        ("E: tax first, price, then TAXAMT := book figure", [
+            (("Tax", "TaxType"), lambda a, r, t, b: t, "str"),
+            (("TaxRate",), lambda a, r, t, b: f"{r:g}%", "str"),
+            (("TaxInclusive",), lambda a, r, t, b: 0, "float"),
+            (("UnitPrice", "Amount"), lambda a, r, t, b: a, "float"),
+            (("Qty",), lambda a, r, t, b: 1, "float"),
+            (("TaxAmt",), lambda a, r, t, b: b, "float"),
+            (("LocalTaxAmt",), lambda a, r, t, b: b, "float"),
+        ]),
+    ]
+
+
+def probe_cash_sale_tax(cfg: SQLConfig, customer: str = "300-C0001",
+                        account: str = "500-000",
+                        tax_code: str = "SV") -> list[str]:
+    """Try each write sequence on an in-memory SL_CS line and report what
+    SQL computes. Read-only: Save is NEVER called. Returns report lines."""
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    app = win32com.client.Dispatch("SQLAcc.BizApp")
+    if not app.IsLogin:
+        app.Login(cfg.user, cfg.password, cfg.dcf_path, cfg.fdb_name)
+
+    samples = [(63.0, 6.0, 3.78), (115.0, 8.0, 9.20)]  # book ground truths
+    out: list[str] = []
+    for case_name, steps in _probe_case_steps():
+        for amount, rate, book_tax in samples:
+            biz, _ = _find_biz(app, "cash_sale", "SL_CS")
+            if biz is None:
+                return ["SL_CS not available on this install"]
+            try:
+                biz.New()
+                main = biz.DataSets.Find("MainDataSet")
+                _set_first(main, ("Code",), customer)
+                _set_first(main, ("DocDate",), _dt.date.today().isoformat(),
+                           kind="date")
+                detail = biz.DataSets.Find("cdsDocDetail")
+                detail.Append()
+                _set_first(detail, ("Account", "ItemCode"), account)
+                _set_first(detail, ("Description",), "PROBE")
+                for fields, value_fn, kind in steps:
+                    try:
+                        _set_first(detail, fields,
+                                   value_fn(amount, rate, tax_code, book_tax),
+                                   kind=kind)
+                    except RuntimeError as e:
+                        out.append(f"  {case_name} [{amount}@{rate:g}%]: "
+                                   f"step {fields} failed: {e}")
+                detail.Post()
+                reads = {}
+                for f in ("TAXAMT", "AMOUNT", "TAXABLEAMT", "TAXRATE",
+                          "AmountWithTax", "LOCALTAXAMT"):
+                    try:
+                        reads[f] = detail.FindField(f).Value
+                    except Exception:
+                        pass
+                verdict = "<-- MATCHES BOOK" if abs(
+                    float(reads.get("TAXAMT") or 0) - book_tax) <= 0.02 else ""
+                out.append(f"{case_name} [{amount}@{rate:g}% book={book_tax}]"
+                           f": {reads} {verdict}")
+            except Exception as e:
+                out.append(f"{case_name} [{amount}@{rate:g}%]: ERROR {e}")
+            finally:
+                try:
+                    biz.Cancel()
+                except Exception:
+                    pass
+    return out
