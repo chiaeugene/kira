@@ -418,4 +418,56 @@ assert beer_fresh["supplier_code"] == "300-C0001"
 print("[learning] approved categories become description-keyed rules - "
       "next month codes itself from her choices  OK")
 
+# --- 8. SST period-boundary retry: SQL refuses a document tax-dated the
+#     first day after a processed SST return (live-observed: 01/07 refused
+#     while 02-19/07 posted with identical writes). The poster retries once
+#     with the tax date +1 day (same bi-monthly SST period), posts, and
+#     surfaces a WARNING - not a failure.
+import types
+
+from kira.poster import SQLConfig, _post_via_com
+
+
+class _BoundaryBiz(_FakeBiz):
+    def __init__(self):
+        super().__init__()
+        self.attempts = []
+
+    def Save(self):
+        td = self.main.fields["TAXDATE"].stored
+        self.attempts.append(td)
+        if td and td.day == 1:
+            raise Exception("(-2147352567, 'Exception occurred.', (0, None, "
+                            "'SST Return (01 May 2026 to 30 Jun 2026) "
+                            "already processed, insert is not allowed', "
+                            "None, 0, -2147418113), None)")
+        self.saved = True
+
+    def New(self):
+        # fresh document per attempt, like the real SDK
+        self.main = _FakeDataSet(MAIN)
+        self.detail = _FakeDataSet(DETAIL)
+        self.DataSets = _FakeDataSets(self.main, self.detail)
+
+
+bbiz = _BoundaryBiz()
+sys.modules["pythoncom"] = types.SimpleNamespace(
+    CoInitialize=lambda: None, CoUninitialize=lambda: None)
+_client_mod = types.SimpleNamespace(
+    Dispatch=lambda name: types.SimpleNamespace(
+        IsLogin=True, BizObjects=_FakeBizObjects(bbiz)))
+sys.modules["win32com"] = types.SimpleNamespace(client=_client_mod)
+sys.modules["win32com.client"] = _client_mod
+
+res = _post_via_com([day1_inv], SQLConfig(dry_run=False),
+                    Path(tempfile.mkdtemp()) / "p.json")
+assert len(res["posted"]) == 1, res
+assert res["errors"] == [], res["errors"]
+assert len(res["warnings"]) == 1 and "tell the accountant" in res["warnings"][0]
+assert [d.day for d in bbiz.attempts] == [1, 2], \
+    f"expected retry with tax date +1, attempts={bbiz.attempts}"
+assert bbiz.saved
+print("[poster] SST boundary refusal -> one retry with tax date +1 day -> "
+      "posted with a warning, not a failure  OK")
+
 print("\nAll cash-sales checks passed.")

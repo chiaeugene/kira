@@ -207,7 +207,7 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
     import win32com.client
 
     pythoncom.CoInitialize()
-    posted, errors = [], []
+    posted, errors, warnings = [], [], []
     try:
         app = win32com.client.Dispatch("SQLAcc.BizApp")
         if not app.IsLogin:
@@ -218,7 +218,31 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
                 _post_one(app, inv)
                 posted.append(inv)
             except Exception as e:  # keep going; report per-invoice failures
-                errors.append({"invoice": inv, "error": str(e)})
+                msg = str(e)
+                # SST period-boundary quirk (live-observed 2026-07-29): a
+                # document dated exactly the FIRST day after a processed SST
+                # return ('01 May to 30 Jun already processed') is refused
+                # as if it were inside the closed period - the identical
+                # write succeeded for every other day of the month. Retry
+                # once with the tax date nudged +1 day: same bi-monthly SST
+                # period (1/7 and 2/7 both file in Jul-Aug), so the SST
+                # return is unaffected; the document date itself stays put.
+                if ("SST Return" in msg and "already processed" in msg):
+                    try:
+                        nudged = (_dt.datetime.strptime(
+                            str(inv["doc_date"])[:10], "%Y-%m-%d")
+                            + _dt.timedelta(days=1)).strftime("%Y-%m-%d")
+                        _post_one(app, inv, tax_date=nudged)
+                        posted.append(inv)
+                        warnings.append(
+                            f"{inv['doc_no']}: posted OK on retry - SQL "
+                            f"refused tax date {inv['doc_date']} as inside "
+                            f"the closed SST period; used tax date {nudged} "
+                            "instead (same SST period, tell the accountant).")
+                        continue
+                    except Exception as e2:
+                        msg = f"{msg} | retry with tax date +1 day: {e2}"
+                errors.append({"invoice": inv, "error": msg})
     finally:
         pythoncom.CoUninitialize()
 
@@ -229,6 +253,7 @@ def _post_via_com(invoices: list[dict], cfg: SQLConfig, payload_path: Path) -> d
         "payload": str(payload_path),
         "posted": posted,
         "errors": errors,
+        "warnings": warnings,
     }
 
 
@@ -302,8 +327,9 @@ def _set_first(dataset, field_names: tuple[str, ...], value, kind="str") -> str:
         + f" (dataset's real fields: {sorted(real.values())})")
 
 
-def _post_one(app, inv: dict) -> None:
-    """Post one grouped document into its SQL module."""
+def _post_one(app, inv: dict, tax_date: str | None = None) -> None:
+    """Post one grouped document into its SQL module. tax_date overrides
+    the TAXDATE only (SST period-boundary retry) - DocDate stays put."""
     doc_type, sql_doc = inv["doc_type"], inv["sql_doc"]
     biz, resolved = _find_biz(app, doc_type, sql_doc)
     if biz is None:
@@ -318,12 +344,13 @@ def _post_one(app, inv: dict) -> None:
     if doc_type != "journal":
         _set_first(main, ("Code",), inv["supplier_code"])
     _set_first(main, ("DocDate",), inv["doc_date"], kind="date")
-    for extra_date in ("PostDate", "TaxDate"):
+    for extra_date, value in (("PostDate", inv["doc_date"]),
+                              ("TaxDate", tax_date or inv["doc_date"])):
         # TAXDATE especially: left unset it can default into a CLOSED SST
         # period — 'SST Return (01 May to 30 Jun) already processed, insert
         # is not allowed' killed a July document (2026-07-28 field bug).
         try:
-            _set_first(main, (extra_date,), inv["doc_date"], kind="date")
+            _set_first(main, (extra_date,), value, kind="date")
         except RuntimeError:
             pass
     # Journals: doc_no here is our own internal grouping key (e.g. the

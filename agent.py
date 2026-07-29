@@ -127,6 +127,8 @@ def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
             log.info("  posted invoice: %s | %s | %s line(s)",
                      inv["supplier_code"], inv["doc_no"] or "(auto no.)",
                      len(inv["lines"]))
+        for w in result.get("warnings", []):
+            log.warning("  NOTE: %s", w)
         for e in result.get("errors", []):
             log.error("  INVOICE FAILED: %s", e)
     except Exception as e:  # report failures, never swallow them
@@ -140,6 +142,7 @@ def poll_once(cfg: dict, client: httpx.Client | None = None) -> str:
         "mode": result["mode"],
         "invoices": result.get("invoices", 0),
         "errors": [str(e) for e in result.get("errors", [])],
+        "warnings": [str(w) for w in result.get("warnings", [])],
         # WHICH documents made it in, even when the batch as a whole
         # failed - the cloud records these in the duplicate guard so a
         # partially-posted batch can never double-post its succeeded

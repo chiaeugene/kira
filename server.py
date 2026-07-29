@@ -190,6 +190,7 @@ def _summary(batch: dict) -> dict:
         # why a failed batch failed — straight from the Agent's report, so
         # the console can show it instead of only the Agent's terminal
         "agent_errors": batch.get("agent_errors", []),
+        "agent_warnings": batch.get("agent_warnings", []),
         "agent_mode": batch.get("agent_mode", ""),
     }
 
@@ -354,7 +355,8 @@ def agent_report(body: dict):
     if ok:
         rows = records_to_df(b["rows"])
         PostedRegistry(client_dir(b["client"])).record(rows)
-        state = store.transition(bid, "posted", agent_mode=body.get("mode", "?"))
+        state = store.transition(bid, "posted", agent_mode=body.get("mode", "?"),
+                                 agent_warnings=body.get("warnings", []))
     else:
         # Partial-posting protection: some documents may have gone into SQL
         # before the batch failed. Record THOSE rows in the duplicate guard
