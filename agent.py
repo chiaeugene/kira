@@ -510,8 +510,15 @@ def verify_month(cfg: dict, month: str) -> int:
     rc = 0
     for name, ccfg in cfg["clients"].items():
         print(f"\n{'=' * 64}\nVERIFY {name}  {month}\n{'=' * 64}")
+        # Progressive output: a stall must name its own stage rather than
+        # leaving a blank screen (first --verify run looked identical to a
+        # crash for two minutes, 2026-07-29).
+        def step(msg: str) -> None:
+            print(msg, flush=True)
+
         # 1. what Kira believes it posted (agent-scoped cloud endpoint)
         expected: dict[str, dict] = {}
+        step(f"[1/3] asking Kira Cloud what it posted for {month}...")
         try:
             r = httpx.get(f"{server}/api/agent/posted",
                           params={"client": name,
@@ -529,7 +536,11 @@ def verify_month(cfg: dict, month: str) -> int:
             print(f"  Could not read Kira's records from the cloud: {e}")
             return 1
 
+        step(f"      -> Kira's records: {len(expected)} day(s)")
+
         # 2. what SQL actually holds right now
+        step("[2/3] reading Cash Sales documents from SQL Accounting "
+             "(needs SQL Accounting CLOSED; Ctrl+C if this stalls)...")
         sql_cfg = SQLConfig(**{k: ccfg.get(k, "") for k in
                                ("user", "password", "dcf_path", "fdb_name")})
         try:
@@ -537,6 +548,8 @@ def verify_month(cfg: dict, month: str) -> int:
         except Exception as e:
             print(f"  Could not read SQL: {e}")
             return 1
+        step(f"      -> SQL returned {len(actual)} document(s) in range")
+        step("[3/3] comparing...\n")
 
         kira_docs = [a for a in actual
                      if "DAILY TAKINGS" in str(a.get("description", "")).upper()]
@@ -545,7 +558,8 @@ def verify_month(cfg: dict, month: str) -> int:
             by_date.setdefault(str(a.get("docdate", ""))[:10], []).append(a)
 
         print(f"Kira's records: {len(expected)} day(s) posted")
-        print(f"In SQL now:     {len(kira_docs)} 'DAILY TAKINGS' document(s)")
+        print(f"In SQL now:     {len(kira_docs)} 'DAILY TAKINGS' "
+              f"document(s) (of {len(actual)} Cash Sales in range)")
         print()
         problems = 0
         for key in sorted(expected, key=lambda k: expected[k]["date"]):
