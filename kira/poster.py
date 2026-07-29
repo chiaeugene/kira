@@ -450,14 +450,45 @@ def _post_one(app, inv: dict) -> None:
             # negative and failed the C.O.D. payment check - and silently
             # CORRUPTED the documents that happened to stay positive
             # (2026-07-28 field bug, 6 wrong documents saved).
-            if line["tax_code"]:
+            expected_tax = float(line.get("tax_amount", 0.0) or 0.0)
+            # A tax code with neither a rate nor an amount is decoration
+            # (e.g. the AI once tagged a service-charge line 'SV' at 0%);
+            # treat it as untaxed rather than letting SQL invent a figure.
+            has_tax = bool(line["tax_code"]) and (
+                float(line.get("tax_rate", 0.0) or 0.0) > 0
+                or expected_tax > 0)
+            if has_tax:
                 _set_first(detail, ("Tax", "TaxType"), line["tax_code"])
-                if line.get("tax_rate"):
-                    try:
-                        _set_first(detail, ("TaxRate",), line["tax_rate"],
-                                   kind="float")
-                    except RuntimeError:
-                        pass
+                rate = float(line.get("tax_rate", 0.0) or 0.0)
+                if rate:
+                    # The UI shows the rate as '6%'; writing it as a bare
+                    # float made SQL drop the RATE into the tax-AMOUNT
+                    # ('computed 6.00 ... book says 3.78', 2026-07-29 field
+                    # bug - every taxed line, whole batch refused). Try the
+                    # UI's own string form first, float as fallback.
+                    for attempt, kind in ((f"{rate:g}%", "str"),
+                                          (rate, "float")):
+                        try:
+                            _set_first(detail, ("TaxRate",), attempt,
+                                       kind=kind)
+                            break
+                        except RuntimeError:
+                            continue
+                # If SQL's computed figure doesn't match the book, write the
+                # book's figure explicitly (it IS the ground truth - the
+                # same numbers the accountant's own document showed) and let
+                # the post-Post verification confirm it survived.
+                try:
+                    got_pre = float(detail.FindField("TAXAMT").Value or 0)
+                except Exception:
+                    got_pre = None
+                if got_pre is not None and abs(got_pre - expected_tax) > 0.02:
+                    for f_name in ("TaxAmt", "LocalTaxAmt"):
+                        try:
+                            _set_first(detail, (f_name,), expected_tax,
+                                       kind="float")
+                        except RuntimeError:
+                            pass
             else:
                 try:
                     _set_first(detail, ("Tax", "TaxType"), "")

@@ -183,20 +183,47 @@ class _FakeFields:
         return _FakeFieldMeta(self._names[i])
 
 
-class _FakeDataSet:
-    """Mirrors the REAL SL_CS behaviors that burned the first live run
-    (2026-07-28): Append() carries the previous line's TAX/TAXRATE onto the
-    new line (seen pre-filled 'SV 8%' in the accountant's video), and Post()
-    computes TAXAMT from the tax code's rate whenever TAX is set."""
+class _RateQuirkField(_FakeField):
+    """The REAL SL_CS quirk found on the third live run (2026-07-29):
+    writing a numeric TAXRATE makes SQL drop the RATE VALUE into TAXAMT
+    ('SQL computed 6.00 ... but the book says 3.78')."""
 
-    TAX_CODE_RATES = {"SV": None}  # None = honour the line's TAXRATE
+    def __init__(self, ds):
+        super().__init__()
+        self._ds = ds
+
+    @property
+    def Value(self):
+        return self.stored
+
+    @Value.setter
+    def Value(self, v):
+        self.stored = v
+        if "TAXAMT" in self._ds.fields:
+            self._ds.fields["TAXAMT"].stored = float(str(v).rstrip("%") or 0)
+
+
+class _FakeDataSet:
+    """Mirrors the REAL SL_CS behaviors that burned live runs one by one:
+    Append() carries the previous line's TAX/TAXRATE onto the new line
+    (2026-07-28, phantom tax), writing TAXRATE drops the rate into TAXAMT
+    (2026-07-29), and codes with a fixed posting-time rate recompute TAXAMT
+    at Post regardless of what was written (the wrong-code scenario)."""
+
+    TAX_CODE_RATES = {"SV": None}  # None = honour whatever TAXAMT holds
 
     def __init__(self, names):
         self.names = names
         self.Fields = _FakeFields(names)
-        self.fields = {n: _FakeField() for n in names}
+        self.fields = self._fresh_fields()
         self.posted_rows: list[dict] = []
         self.queried: list[str] = []
+
+    def _fresh_fields(self):
+        f = {n: _FakeField() for n in self.names}
+        if "TAXRATE" in f:
+            f["TAXRATE"] = _RateQuirkField(self)
+        return f
 
     def FindField(self, name):
         self.queried.append(name)
@@ -209,7 +236,7 @@ class _FakeDataSet:
                     if "TAX" in self.fields else None)
         prev_rate = (self.fields.get("TAXRATE").stored
                      if "TAXRATE" in self.fields else None)
-        self.fields = {n: _FakeField() for n in self.names}
+        self.fields = self._fresh_fields()
         # SQL Accounting's inheritance: the new line starts with the
         # previous line's tax — the exact trap the poster must clear.
         if "TAX" in self.fields and prev_tax:
@@ -221,10 +248,9 @@ class _FakeDataSet:
             code = self.fields.get("TAX").stored if "TAX" in self.fields else None
             if code:
                 fixed = self.TAX_CODE_RATES.get(code, 0.0)
-                rate = (self.fields["TAXRATE"].stored or 0.0
-                        if fixed is None else fixed)
-                amt = self.fields.get("UNITPRICE").stored or 0.0
-                self.fields["TAXAMT"].stored = round(amt * rate / 100, 2)
+                if fixed is not None:  # posting-time recalc clobbers writes
+                    amt = self.fields.get("UNITPRICE").stored or 0.0
+                    self.fields["TAXAMT"].stored = round(amt * fixed / 100, 2)
             else:
                 self.fields["TAXAMT"].stored = 0.0
         self.posted_rows.append({n: f.stored for n, f in self.fields.items()
@@ -285,8 +311,11 @@ assert len(rows) == 7, len(rows)
 assert isinstance(biz.main.fields["TAXDATE"].stored, dt.datetime), \
     "tax date must be set explicitly (unset -> closed-SST-period default)"
 beer = next(r for r in rows if r.get("UNITPRICE") == 980.0)
-assert beer["TAX"] == "SV" and beer["TAXRATE"] == 8.0
-assert beer["TAXAMT"] == 78.4, "SQL's computed SST must match the book"
+assert beer["TAX"] == "SV" and str(beer["TAXRATE"]) in ("8%", "8.0", "8")
+# The rate-quirk drops 8.00 into TAXAMT; the poster must detect that
+# pre-Post and overwrite with the book's real figure.
+assert beer["TAXAMT"] == 78.4, \
+    f"book's SST must survive the rate quirk, got {beer['TAXAMT']}"
 # THE 2026-07-28 KILLER: lines after BEER inherit 'SV 8%' via Append -
 # the poster must clear it, or every payment line carries phantom tax.
 for r in rows:
