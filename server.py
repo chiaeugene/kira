@@ -386,6 +386,29 @@ def agent_report(body: dict):
     return {"state": state["state"]}
 
 
+@app.get("/api/agent/posted", dependencies=[Depends(agent_auth)])
+def agent_posted(client: str, month: str = ""):
+    """What Kira believes it posted for ONE client — the Agent's half of
+    the --verify reconciliation (the other half is read straight from SQL).
+    Agent-scoped on purpose: /api/batches is firm-only and returns every
+    client, which an Agent has no business reading."""
+    _require_client(client)
+    days: dict[str, dict] = {}
+    for b in store.list(client, "posted"):
+        for row in b["rows"]:
+            date = str(row.get("date", ""))
+            if month and not date.startswith(month):
+                continue
+            key = str(row.get("doc_no") or date)
+            d = days.setdefault(key, {"date": date, "cash": 0.0, "lines": 0})
+            d["cash"] += (float(row.get("amount", 0) or 0)
+                          + float(row.get("tax", 0) or 0))
+            d["lines"] += 1
+    return [{"key": k, "date": v["date"], "cash": round(v["cash"], 2),
+             "lines": v["lines"]} for k, v in sorted(days.items(),
+                                                     key=lambda kv: kv[1]["date"])]
+
+
 @app.get("/api/agents", dependencies=[Depends(firm_auth)])
 def agents_status():
     if not AGENTS_STATUS.exists():

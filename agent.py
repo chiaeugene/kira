@@ -510,26 +510,17 @@ def verify_month(cfg: dict, month: str) -> int:
     rc = 0
     for name, ccfg in cfg["clients"].items():
         print(f"\n{'=' * 64}\nVERIFY {name}  {month}\n{'=' * 64}")
-        # 1. what Kira believes it posted (from the cloud's batch records)
+        # 1. what Kira believes it posted (agent-scoped cloud endpoint)
         expected: dict[str, dict] = {}
         try:
-            r = httpx.get(f"{server}/api/batches",
-                          params={"client": name, "state": "posted"},
+            r = httpx.get(f"{server}/api/agent/posted",
+                          params={"client": name,
+                                  "month": f"{year:04d}-{mon:02d}"},
                           headers={"Authorization": f"Bearer {token}"},
                           timeout=60)
             r.raise_for_status()
-            for summary in r.json():
-                d = httpx.get(f"{server}/api/batches/{summary['batch_id']}",
-                              headers={"Authorization": f"Bearer {token}"},
-                              timeout=60).json()
-                for row in d.get("rows", []):
-                    if not str(row.get("date", "")).startswith(f"{year:04d}-{mon:02d}"):
-                        continue
-                    key = str(row.get("doc_no") or row.get("date"))
-                    e = expected.setdefault(key, {"date": str(row["date"]),
-                                                  "cash": 0.0})
-                    e["cash"] += float(row.get("amount", 0) or 0) + \
-                        float(row.get("tax", 0) or 0)
+            for d in r.json():
+                expected[d["key"]] = {"date": d["date"], "cash": d["cash"]}
         except Exception as e:
             print(f"  Could not read Kira's records from the cloud: {e}")
             return 1

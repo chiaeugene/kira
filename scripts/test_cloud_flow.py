@@ -320,6 +320,24 @@ r = api.post("/api/clients/DEMO_CLIENT/registry/clear", headers=AGENT)
 assert r.status_code == 401, "registry clear is firm-only"
 print(f"[registry-clear] duplicate guard reset; agent token rejected  OK")
 
+# 8f. agent-scoped posted-work readback (the --verify reconciliation half).
+# Agent token allowed (it needs its own work back); firm token rejected on
+# this agent-only route, and /api/batches stays firm-only so an Agent can
+# never enumerate every client's batches.
+r = api.get("/api/agent/posted", headers=AGENT,
+            params={"client": "DEMO_CLIENT", "month": "2026-06"})
+assert r.status_code == 200, r.text
+posted_days = r.json()
+assert isinstance(posted_days, list)
+assert all({"key", "date", "cash", "lines"} <= set(d) for d in posted_days)
+r = api.get("/api/agent/posted", headers=FIRM, params={"client": "DEMO_CLIENT"})
+assert r.status_code == 401, "posted-readback is agent-only"
+r = api.get("/api/batches", headers=AGENT)
+assert r.status_code == 401, "/api/batches must stay firm-only"
+print(f"[agent-posted] agent reads its own posted work "
+      f"({len(posted_days)} day(s)); firm token and cross-route access "
+      "rejected  OK")
+
 # 9. firm overview
 ov = api.get("/api/firm/overview", headers=FIRM).json()
 print(f"[overview] queue: {ov['queue']}")
