@@ -45,6 +45,11 @@ from kira.poster import SQLConfig, post_batch, read_masters
 BASE_DIR = (Path(sys.executable).parent if getattr(sys, "frozen", False)
             else Path(__file__).parent)
 
+# Stamped into every build. Several sessions were lost to "which exe am I
+# actually running?" after successive versions were extracted over each
+# other in the same folder - the answer must be visible, not inferred.
+VERSION = "v24"
+
 load_env(BASE_DIR / ".env")  # can carry KIRA_SERVER_URL / KIRA_AGENT_TOKEN
 
 log = logging.getLogger("kira.agent")
@@ -70,7 +75,7 @@ def load_cfg(path: str = "agent_config.yaml") -> dict:
 
 def banner(cfg: dict) -> None:
     log.info("=" * 62)
-    log.info("KIRA AGENT - %s", cfg.get("agent_name", "agent"))
+    log.info("KIRA AGENT %s - %s", VERSION, cfg.get("agent_name", "agent"))
     log.info("Cloud:   %s", cfg["server_url"])
     log.info("Polling: every %ss", cfg.get("poll_seconds", 30))
     for name, c in cfg["clients"].items():
@@ -615,8 +620,14 @@ def main() -> int:
                     help="read-only: compare what Kira posted for a month "
                          "against what is ACTUALLY in SQL right now - lists "
                          "missing, extra and mismatched documents")
+    ap.add_argument("--version", action="store_true",
+                    help="print this build's version and exit")
     ap.add_argument("--config", default=str(BASE_DIR / "agent_config.yaml"))
     args = ap.parse_args()
+
+    if args.version:
+        print(f"Kira Agent {VERSION}")
+        return 0
 
     setup_logging()
 
